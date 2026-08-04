@@ -1,0 +1,82 @@
+name: Build RS41 RSM424 433.900 MHz
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rs41-rsm424/**"
+      - ".github/workflows/build-rs41-rsm424.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out build recipe
+        uses: actions/checkout@v4
+
+      - name: Fetch pinned RS41-NFW source
+        run: |
+          git clone https://github.com/Nevvman18/rs41-nfw.git nfw
+          git -C nfw checkout 6b3c82936e0f3ebde21e92ee9aaa904087b5c035
+          git -C nfw status --short
+
+      - name: Build pinned NFW compiler image
+        run: |
+          docker build -t rs41-nfw-builder nfw/rs41-nfw_souding-software/backend
+
+      - name: Configure and compile RSM424 firmware
+        run: |
+          mkdir -p out
+          chmod -R a+rwX nfw out
+
+          docker run --rm \
+            --entrypoint /bin/bash \
+            -v "$GITHUB_WORKSPACE/nfw:/src" \
+            -v "$GITHUB_WORKSPACE/rs41-rsm424:/job:ro" \
+            -v "$GITHUB_WORKSPACE/out:/out" \
+            rs41-nfw-builder -lc '
+              set -euo pipefail
+              export HOME=/home/builder
+              CORE=/home/builder/.arduino15/packages/STMicroelectronics/hardware/stm32/2.10.1
+              VARIANT_SRC="/src/fw/arduino-ide_variant-files/variants/STM32L4xx/L412RB(I-T)xP"
+              VARIANT_DST="$CORE/variants/STM32L4xx/L412RB(I-T)xP"
+
+              rm -rf "$VARIANT_DST"
+              cp -a "$VARIANT_SRC" "$VARIANT_DST"
+              if ! grep -q "GENERIC_L412RBTXP" "$CORE/boards.txt"; then
+                printf "\n" >> "$CORE/boards.txt"
+                cat /src/fw/arduino-ide_variant-files/boards.txt >> "$CORE/boards.txt"
+              fi
+
+              python3 /job/build_config.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                X1323885
+
+              arduino-cli compile \
+                --fqbn "STMicroelectronics:stm32:GenL4:pnum=GENERIC_L412RBTXP,opt=osstd" \
+                --output-dir /out \
+                /src/rs41-nfw_sonde-firmware
+            '
+
+      - name: Verify build products
+        run: |
+          set -euo pipefail
+          find out -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+          BIN="$(find out -maxdepth 1 -type f -name '*.bin' -print -quit)"
+          test -n "$BIN"
+          test -s "$BIN"
+          sha256sum "$BIN" | tee out/SHA256SUMS
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RSM424-AK5Z-433900-HorusV3
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
