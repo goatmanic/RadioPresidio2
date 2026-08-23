@@ -80,11 +80,11 @@ jobs:
               test -x "$NM"
               ELF="$(find /out -maxdepth 1 -type f -name "*.elf" -print -quit)"
               test -n "$ELF"
-              "$NM" -S -n "$ELF" | grep -E "nfwRamLog(NfwFramesOmitted|Write|Total)?$" > /out/RAMLOG-SYMBOLS.txt
+              "$NM" -S -n "$ELF" | grep -E "nfwRamLog(Magic|Version|NfwFramesOmitted|Write|Total)?$" > /out/RAMLOG-SYMBOLS.txt
               cat /out/RAMLOG-SYMBOLS.txt
               RING_SIZE="$(grep -E " nfwRamLog$" /out/RAMLOG-SYMBOLS.txt | tr -s " " | cut -d " " -f 2)"
-              test "$RING_SIZE" = "00001000"
-              test "$(wc -l < /out/RAMLOG-SYMBOLS.txt)" -eq 4
+              test "$RING_SIZE" = "00002000"
+              test "$(wc -l < /out/RAMLOG-SYMBOLS.txt)" -eq 6
             '
 
       - name: Audit generated configuration
@@ -141,6 +141,9 @@ jobs:
           assert cal['subframe_serial'] == 'X0852387'
           assert cal['mainboard'] == 'RSM424'
           assert cal['mainboard_serial'] == 'X0551026'
+          assert summary['ram_debug_ring_bytes'] == 8192
+          assert summary['ram_debug_version'] == 2
+          assert summary['ram_debug_magic'] == 'NFWL'
           assert summary['ram_debug_omits_bulk_nfw_frames'] is True
           print('Generated configuration audit: PASS')
           PY
@@ -186,7 +189,7 @@ jobs:
           Period: 60 seconds, GPS-clock aligned
           Startup PTU: factory temperature check + factory humidity reconditioning/check
           Zero-humidity recalibration: disabled
-          RAM log: 4096-byte human-readable XDATA circular buffer; bulk \$NFW frames omitted
+          RAM log: 8192-byte human-readable XDATA circular buffer, NFWL v2; bulk \$NFW frames omitted
           EOF
 
           echo '--- final artifact contents ---'
