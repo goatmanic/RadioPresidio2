@@ -143,11 +143,10 @@ def build_config(config_path: Path, serial: str) -> None:
     config = set_scalar(config, "gpsQzssEnable", False)
 
     # Aggressive PTU validation in factory-calibration mode. factoryHumidityCheck()
-    # itself performs the ~one-minute ~138 C reconditioning/heater test and verifies
-    # a bone-dry result; the separate NFW-mode reconditioningEnabled setting is not
-    # executed while FACTORY_CAL_ACTIVE, so leave it false to avoid misleading config.
-    # Do NOT enable zero-humidity recalibration: it mutates calibration and requires a
-    # genuinely dry reference.
+    # itself performs the reconditioning/heater test; the separate NFW-mode
+    # reconditioningEnabled setting is not executed while FACTORY_CAL_ACTIVE.
+    # Do NOT enable zero-humidity recalibration: it mutates calibration and requires
+    # a genuinely dry reference.
     config = set_scalar(config, "sensorBoomEnable", True)
     config = set_scalar(config, "sensorBoomPowerSaving", True)
     config = set_scalar(config, "sensorBoomPowerSavingInterval", 60000)
@@ -189,8 +188,8 @@ def build_config(config_path: Path, serial: str) -> None:
         "factory_humidity_check_basis": "sensor-local factory-matrix RH before ambient vapor-pressure conversion",
         "separate_nfw_reconditioning": False,
         "zero_humidity_recalibration": False,
-        "ram_debug_ring_bytes": 8192,
-        "ram_debug_version": 2,
+        "ram_debug_ring_bytes": 16384,
+        "ram_debug_version": 3,
         "ram_debug_magic": "NFWL",
         "ram_debug_omits_bulk_nfw_frames": True,
         "factory_calibration": metadata,
