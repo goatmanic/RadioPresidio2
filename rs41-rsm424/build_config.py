@@ -186,6 +186,7 @@ def build_config(config_path: Path, serial: str) -> None:
         "payload_callsign": "AK5Z",
         "factory_temperature_check": True,
         "factory_humidity_check_with_reconditioning": True,
+        "factory_humidity_check_basis": "sensor-local factory-matrix RH before ambient vapor-pressure conversion",
         "separate_nfw_reconditioning": False,
         "zero_humidity_recalibration": False,
         "ram_debug_ring_bytes": 8192,
