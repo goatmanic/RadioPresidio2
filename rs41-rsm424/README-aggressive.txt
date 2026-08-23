@@ -2,7 +2,7 @@ RSM424 X0551026 / sensor boom X0852387
 AK5Z 433.900 MHz Horus V3 aggressive humidity diagnostic build
 
 CANONICAL PACKAGE/BINARY BASENAME
-  RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v2
+  RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v3
 
 PTU startup validation
 - Vaisala factory calibration for X0852387 is loaded.
@@ -32,12 +32,16 @@ Normal runtime configuration
 
 ST-LINK RAM LOG
 - Human-readable XDATA output is mirrored into an 8192-byte circular SRAM ring.
-- The periodic bulk $NFW telemetry frames are deliberately NOT copied into the
-  ring because they would overwrite calibration diagnostics within seconds.
+- Periodic $NFW telemetry lines are forwarded normally to the physical XDATA UART
+  but deliberately NOT copied into the RAM ring.
+- v3 fixes the Arduino Print byte-at-a-time path: filtering is line-oriented at
+  write(uint8_t), recognizes both $NFW| and legacy $NFW, prefixes, and therefore
+  works regardless of which Print overload emits the frame.
 - A counter records how many $NFW frames were omitted.
-- The running firmware exposes magic "NFWL" and RAM-log version 2. The decoder
-  refuses to interpret SRAM if those markers do not match, preventing an old or
-  mismatched firmware image from being mistaken for this diagnostic build.
+- The running firmware exposes magic "NFWL" and RAM-log ABI version 2. The ABI
+  remains v2 because the ring/counter layout is unchanged; v3 is the firmware
+  package revision that fixes filtering semantics.
+- The decoder refuses to interpret SRAM if those markers do not match.
 - RAMLOG-SYMBOLS.txt is generated from the exact ELF on every CI build.
 - dump-ram-log.sh resolves addresses from that symbol file; it does not hard-code
   addresses from an older build.
