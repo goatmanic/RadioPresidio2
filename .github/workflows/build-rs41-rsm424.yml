@@ -14,7 +14,7 @@ permissions:
 env:
   PROBE_SERIAL: X0551026
   SENSOR_BOOM_SERIAL: X0852387
-  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v3
+  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v4
 
 jobs:
   build:
@@ -71,6 +71,9 @@ jobs:
               python3 /job/instrument_ram_log.py \
                 /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
 
+              python3 /job/fix_factory_humidity_check.py \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
               arduino-cli compile \
                 --fqbn "STMicroelectronics:stm32:GenL4:pnum=GENERIC_L412RBTXP,opt=osstd" \
                 --output-dir /out \
@@ -106,6 +109,28 @@ jobs:
           if "buffer[4] == ','" in src:
               raise SystemExit('RAM-log filter audit failed: obsolete bulk-only comma detector still present')
           print('RAM-log byte-stream filter audit: PASS ($NFW| and $NFW, suppressed from RAM)')
+          PY
+
+      - name: Audit heated factory humidity check
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          required = [
+              'float factoryRhSensorLocal = -1.0f;',
+              'factoryRhSensorLocal = rh;',
+              'const float localRh = factoryRhSensorLocal;',
+              '[info]: humidity CHECK dry sample ',
+              '[err]: humidity CHECK FAILED - sensor-local dry reading ',
+              '[info]: humidity CHECK passed - sensor-local dry reading ',
+          ]
+          missing = [s for s in required if s not in src]
+          if missing:
+              raise SystemExit('Factory humidity-domain audit failed; missing: ' + repr(missing))
+          if 'rhSum += humidityValue; rhCount++;' in src:
+              raise SystemExit('Factory humidity-domain audit failed: old ambient-equivalent dry-check remains')
+          print('Factory humidity-domain audit: PASS (hot/dry test uses sensor-local matrix RH)')
           PY
 
       - name: Audit generated configuration
@@ -196,7 +221,7 @@ jobs:
           chmod 0755 out/flash-openocd.sh out/dump-ram-log.sh out/decode_ram_log.py
           bash -n out/flash-openocd.sh
           bash -n out/dump-ram-log.sh
-          python3 -m py_compile out/decode_ram_log.py rs41-rsm424/build_config.py rs41-rsm424/instrument_ram_log.py
+          python3 -m py_compile out/decode_ram_log.py rs41-rsm424/build_config.py rs41-rsm424/instrument_ram_log.py rs41-rsm424/fix_factory_humidity_check.py
           rm -rf out/__pycache__ rs41-rsm424/__pycache__
 
           cat > out/DEVICE.txt <<EOF
@@ -208,9 +233,10 @@ jobs:
           Mode: Horus Binary V3
           Callsign: AK5Z
           Period: 60 seconds, GPS-clock aligned
-          Startup PTU: factory temperature check + factory humidity reconditioning/check
+          Startup PTU: factory temperature check + heated factory humidity check
+          Humidity dry-check basis: sensor-local factory-matrix RH before ambient vapor-pressure conversion
           Zero-humidity recalibration: disabled
-          RAM log: 8192-byte human-readable XDATA circular buffer; package v3, NFWL ABI v2; \$NFW|/\$NFW, lines omitted
+          RAM log: 8192-byte human-readable XDATA circular buffer; package v4, NFWL ABI v2; \$NFW|/\$NFW, lines omitted
           EOF
 
           echo '--- final artifact contents ---'
