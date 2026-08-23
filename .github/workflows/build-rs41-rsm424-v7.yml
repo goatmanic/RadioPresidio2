@@ -1,0 +1,297 @@
+name: Build RS41 RSM424 v7 daily GPS
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rs41-rsm424/**"
+      - ".github/workflows/build-rs41-rsm424-v7.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PROBE_SERIAL: X0551026
+  SENSOR_BOOM_SERIAL: X0852387
+  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v7
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out build recipe
+        uses: actions/checkout@v4
+
+      - name: Fetch pinned RS41-NFW source
+        run: |
+          git clone https://github.com/Nevvman18/rs41-nfw.git nfw
+          git -C nfw checkout 6b3c82936e0f3ebde21e92ee9aaa904087b5c035
+          test "$(git -C nfw rev-parse HEAD)" = "6b3c82936e0f3ebde21e92ee9aaa904087b5c035"
+
+      - name: Build pinned NFW compiler image
+        run: |
+          docker build -t rs41-nfw-builder nfw/rs41-nfw_souding-software/backend
+
+      - name: Configure patch and compile v7
+        run: |
+          mkdir -p out
+          chmod -R a+rwX nfw out
+
+          docker run --rm \
+            --entrypoint /bin/bash \
+            -e PROBE_SERIAL="$PROBE_SERIAL" \
+            -e SENSOR_BOOM_SERIAL="$SENSOR_BOOM_SERIAL" \
+            -v "$GITHUB_WORKSPACE/nfw:/src" \
+            -v "$GITHUB_WORKSPACE/rs41-rsm424:/job:ro" \
+            -v "$GITHUB_WORKSPACE/out:/out" \
+            rs41-nfw-builder -lc '
+              set -euo pipefail
+              export HOME=/home/builder
+              CORE=/home/builder/.arduino15/packages/STMicroelectronics/hardware/stm32/2.10.1
+              VARIANT_SRC="/src/fw/arduino-ide_variant-files/variants/STM32L4xx/L412RB(I-T)xP"
+              VARIANT_DST="$CORE/variants/STM32L4xx/L412RB(I-T)xP"
+
+              rm -rf "$VARIANT_DST"
+              cp -a "$VARIANT_SRC" "$VARIANT_DST"
+              if ! grep -q "GENERIC_L412RBTXP" "$CORE/boards.txt"; then
+                printf "\n" >> "$CORE/boards.txt"
+                cat /src/fw/arduino-ide_variant-files/boards.txt >> "$CORE/boards.txt"
+              fi
+
+              python3 /job/build_config.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                "$SENSOR_BOOM_SERIAL"
+
+              python3 /job/inject_factory_rh_pressure_cal.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                "$SENSOR_BOOM_SERIAL"
+
+              python3 /job/instrument_ram_log.py \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              python3 /job/fix_factory_humidity_check.py \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              python3 /job/fix_v5_factory_cap_logging.py \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              python3 /job/enable_tx_only_led.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              python3 /job/enable_daily_gps_relock.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              arduino-cli compile \
+                --fqbn "STMicroelectronics:stm32:GenL4:pnum=GENERIC_L412RBTXP,opt=osstd" \
+                --output-dir /out \
+                /src/rs41-nfw_sonde-firmware
+
+              NM="$(find /home/builder/.arduino15/packages/STMicroelectronics/tools -type f -name arm-none-eabi-nm -print -quit)"
+              SIZE="$(find /home/builder/.arduino15/packages/STMicroelectronics/tools -type f -name arm-none-eabi-size -print -quit)"
+              test -x "$NM"
+              test -x "$SIZE"
+              ELF="$(find /out -maxdepth 1 -type f -name "*.elf" -print -quit)"
+              test -n "$ELF"
+
+              STATIC_RAM="$($SIZE "$ELF" | awk "NR==2 {print \$2+\$3}")"
+              FREE_RAM=$((40960 - STATIC_RAM))
+              echo "Static/global SRAM use: ${STATIC_RAM} bytes; conservative free before stack/locals: ${FREE_RAM} bytes"
+              test "$FREE_RAM" -ge 15360
+
+              "$NM" -S -n "$ELF" | grep -E "nfwRamLog(Magic|Version|NfwFramesOmitted|Write|Total)?$" > /out/RAMLOG-SYMBOLS.txt
+              cat /out/RAMLOG-SYMBOLS.txt
+              test "$(grep -E " nfwRamLog$" /out/RAMLOG-SYMBOLS.txt | tr -s " " | cut -d " " -f 2)" = "00004000"
+              test "$(wc -l < /out/RAMLOG-SYMBOLS.txt)" -eq 6
+            '
+
+      - name: Audit v7 RAM log and TX-only LEDs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          cfg = Path('nfw/rs41-nfw_sonde-firmware/CONFIG.h').read_text()
+          dec = Path('rs41-rsm424/decode_ram_log.py').read_text()
+          required = [
+              'constexpr uint32_t NFW_RAM_LOG_SIZE = 16384;',
+              'nfwRamLogVersion __attribute__((used)) = 3;',
+              'case 4: return b == \'|\' || b == \',\';',
+              'Low-power diagnostic build: normal status/startup LED calls stay dark.',
+              'TX-only LED policy: with normal status LEDs disabled, light green only while',
+          ]
+          missing = [s for s in required if s not in src]
+          if missing: raise SystemExit('RAM/LED audit missing: ' + repr(missing))
+          assert 'version != 3' in dec and 'len(ring) != 16384' in dec
+          assert re.search(r'ledStatusEnable\s*=\s*false\s*;', cfg)
+          print('RAM-log + TX-only LED audit: PASS')
+          PY
+
+      - name: Audit 24-hour M10 PSMOO policy
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          cfg = Path('nfw/rs41-nfw_sonde-firmware/CONFIG.h').read_text()
+          summary = json.loads(Path('out/build-summary.json').read_text())
+
+          required = [
+              'static constexpr unsigned long DAILY_GPS_RELOCK_MS = 86400000UL;',
+              'void m10SetDailyPsmoo() {',
+              'm10ValSetU4(0x40D00002UL, 0);',
+              'm10ValSetU4(0x40D00003UL, 0);',
+              'm10ValSetU2(0x30D00005UL, 0);',
+              'm10ValSetU1(0x10D00008UL, 1);',
+              'm10ValSetU1(0x10D00009UL, 0);',
+              'm10ValSetU1(0x10D0000AUL, 0);',
+              'm10ValSetU1(0x20D00001UL, 1);',
+              'return;                                      // absolutely no GPS UART traffic',
+              'sendUbxPoll(UbxGnss::CLS_NAV, UbxGnss::NAV_PVT);',
+              '[gps]: 24-hour relock wake - M10 acquiring',
+              'dailyFreshFix = false;',
+              'm10SetDailyPsmoo();',
+              'dailyGpsUtcNowSeconds()',
+              '.timeOfDaySeconds  = dailyGpsUtcNowSeconds(),',
+          ]
+          missing = [s for s in required if s not in src]
+          if missing: raise SystemExit('Daily GPS audit missing: ' + repr(missing))
+
+          if not re.search(r'm10CyclicTracking\s*=\s*false\s*;', cfg):
+              raise SystemExit('Daily GPS audit: ordinary M10 PSMCT is still enabled')
+          if not re.search(r'gpsSecondaryGnss\s*=\s*2\s*;', cfg):
+              raise SystemExit('Daily GPS audit: GLONASS-only secondary GNSS expected')
+          if not re.search(r'gpsSbasEnable\s*=\s*false\s*;', cfg):
+              raise SystemExit('Daily GPS audit: SBAS must remain disabled for M10 PSM')
+
+          assert summary['gps_daily_relock_seconds'] == 86400
+          assert summary['gps_sleep_mode'] == 'M10 PSMOO'
+          assert summary['gps_sleep_host_controlled'] is True
+          assert summary['gps_packet_utc_free_runs_between_relocks'] is True
+          print('24-hour M10 PSMOO audit: PASS')
+          PY
+
+      - name: Audit PTU and radio configuration
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, math, re
+          from pathlib import Path
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          cfg = Path('out/CONFIG.h').read_text()
+          corr = json.loads(Path('out/factory-rh-pressure-corrections.json').read_text())
+          summary = json.loads(Path('out/build-summary.json').read_text())
+
+          source_required = [
+              'float factoryRhSensorLocal = -1.0f;',
+              'float factoryRhCorrectedCp = 0.0f;',
+              'float factoryRhRawCap = 0.0f;',
+              'factoryCorHp[j]', 'factoryCorHt[4 * j + k]', 'Cp -= corrCp;',
+              'const float reconditioningTargetC = 150.0f;',
+              'const unsigned long reconditioningDwellMs = 180000UL;',
+              'humidity CHECK zero sample ', 'capSum += factoryRhRawCap;',
+          ]
+          missing = [s for s in source_required if s not in src]
+          if missing: raise SystemExit('PTU audit missing: ' + repr(missing))
+
+          checks = {
+              'RSM4x4': r'^#define\s+RSM4x4\b',
+              'Horus V3': r'horusV3Enable\s*=\s*true\s*;',
+              '433.900': r'horusV3FreqTable\[\]\s*=\s*\{433\.9\}\s*;',
+              'AK5Z': r'#define\s+HORUS_V3_CALLSIGN\s+"AK5Z"',
+              '100 baud': r'horusV3Bdr\s*=\s*100\s*;',
+              '60 seconds': r'horusV3TimeSyncSeconds\s*=\s*60\s*;',
+              'power 3': r'horusV3RadioPower\s*=\s*3\s*;',
+              'RPM411': r'pressureMode\s*=\s*1\s*;',
+              'APRS off': r'aprsEnable\s*=\s*false\s*;',
+              'Horus V2 off': r'horusEnable\s*=\s*false\s*;',
+          }
+          failed = [k for k,v in checks.items() if not re.search(v, cfg, re.M)]
+          if failed: raise SystemExit('Radio/config audit failed: ' + ', '.join(failed))
+
+          assert corr['sensor_boom_serial'] == 'X0852387'
+          assert len(corr['corHp']) == 3 and len(corr['corHt']) == 12
+          assert all(math.isfinite(float(x)) for x in corr['corHp'] + corr['corHt'])
+          cal = summary['factory_calibration']
+          assert summary['probe_mainboard_serial'] == 'X0551026'
+          assert summary['sensor_boom_calibration_serial'] == 'X0852387'
+          assert cal['mainboard'] == 'RSM424' and cal['mainboard_serial'] == 'X0551026'
+          print('PTU + radio audit: PASS')
+          PY
+
+      - name: Canonicalize and verify v7 products
+        run: |
+          set -euo pipefail
+          ORIGINAL_BIN="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.bin' -print -quit)"
+          ORIGINAL_ELF="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.elf' -print -quit)"
+          ORIGINAL_HEX="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.hex' -print -quit)"
+          ORIGINAL_MAP="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.map' -print -quit)"
+          for f in "$ORIGINAL_BIN" "$ORIGINAL_ELF" "$ORIGINAL_HEX" "$ORIGINAL_MAP"; do test -s "$f"; done
+
+          cp -- "$ORIGINAL_BIN" "out/${PACKAGE_BASENAME}.bin"
+          cp -- "$ORIGINAL_ELF" "out/${PACKAGE_BASENAME}.elf"
+          cp -- "$ORIGINAL_HEX" "out/${PACKAGE_BASENAME}.hex"
+          cp -- "$ORIGINAL_MAP" "out/${PACKAGE_BASENAME}.map"
+          rm -- "$ORIGINAL_BIN" "$ORIGINAL_ELF" "$ORIGINAL_HEX" "$ORIGINAL_MAP"
+
+          test "$(stat -c %s "out/${PACKAGE_BASENAME}.bin")" -le 131072
+          (cd out && sha256sum "${PACKAGE_BASENAME}.bin" > SHA256SUMS)
+          cat out/SHA256SUMS
+
+          cp rs41-rsm424/flash-openocd.sh out/flash-openocd.sh
+          cp rs41-rsm424/dump-ram-log.sh out/dump-ram-log.sh
+          cp rs41-rsm424/decode_ram_log.py out/decode_ram_log.py
+          cp rs41-rsm424/README-aggressive-v7.txt out/README.txt
+          chmod 0755 out/flash-openocd.sh out/dump-ram-log.sh out/decode_ram_log.py
+
+          bash -n out/flash-openocd.sh
+          bash -n out/dump-ram-log.sh
+          python3 -m py_compile \
+            out/decode_ram_log.py \
+            rs41-rsm424/build_config.py \
+            rs41-rsm424/instrument_ram_log.py \
+            rs41-rsm424/inject_factory_rh_pressure_cal.py \
+            rs41-rsm424/fix_factory_humidity_check.py \
+            rs41-rsm424/fix_v5_factory_cap_logging.py \
+            rs41-rsm424/enable_tx_only_led.py \
+            rs41-rsm424/enable_daily_gps_relock.py
+          rm -rf out/__pycache__ rs41-rsm424/__pycache__
+
+          grep -q 'AGGRESSIVE-RAMLOG-v7' out/README.txt
+          grep -q '86,400,000 ms' out/README.txt
+          grep -q 'M10 PSMOO' out/README.txt
+          grep -q 'm10CyclicTracking.*false' out/CONFIG.h
+          grep -q 'ledStatusEnable.*false' out/CONFIG.h
+
+          cat > out/DEVICE.txt <<EOF
+          Canonical package: ${PACKAGE_BASENAME}.zip
+          Probe / main electronics: ${PROBE_SERIAL}
+          Sensor boom / calibration: ${SENSOR_BOOM_SERIAL}
+          Board: RSM424 / STM32L412RBT6
+          Frequency: 433.900 MHz
+          Mode: Horus Binary V3, 100 baud
+          Callsign: AK5Z
+          RF period: 60 seconds; initially GPS-seeded, MCU clock free-runs between daily relocks
+          GPS: initial valid fix -> M10 PSMOO inactive -> UART silent 86400 s -> wake/relock -> inactive
+          Startup humidity: about 150 C for 3 minutes, physical-zero check, then cooling
+          Factory RH: full matrix plus corHp/corHt pressure compensation
+          LEDs: low-power TX-only; dark except green during actual keyed RF TX
+          RAM log: 16384-byte circular XDATA buffer; NFWL ABI v3; \$NFW lines omitted
+          EOF
+
+          echo '--- final v7 artifact contents ---'
+          find out -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+
+      - name: Upload canonical v7 firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_BASENAME }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
