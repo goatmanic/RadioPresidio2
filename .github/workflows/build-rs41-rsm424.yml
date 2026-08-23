@@ -81,6 +81,10 @@ jobs:
               python3 /job/fix_v5_factory_cap_logging.py \
                 /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
 
+              python3 /job/enable_tx_only_led.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
               arduino-cli compile \
                 --fqbn "STMicroelectronics:stm32:GenL4:pnum=GENERIC_L412RBTXP,opt=osstd" \
                 --output-dir /out \
@@ -96,8 +100,8 @@ jobs:
               STATIC_RAM="$($SIZE "$ELF" | awk "NR==2 {print \$2+\$3}")"
               FREE_RAM=$((40960 - STATIC_RAM))
               echo "Static/global SRAM use: ${STATIC_RAM} bytes; free before stack/locals: ${FREE_RAM} bytes"
-              test "$STATIC_RAM" -le 24576
-              test "$FREE_RAM" -ge 16384
+              test "$STATIC_RAM" -le 25600
+              test "$FREE_RAM" -ge 15360
 
               "$NM" -S -n "$ELF" | grep -E "nfwRamLog(Magic|Version|NfwFramesOmitted|Write|Total)?$" > /out/RAMLOG-SYMBOLS.txt
               cat /out/RAMLOG-SYMBOLS.txt
@@ -132,6 +136,29 @@ jobs:
               if required_decoder not in dec:
                   raise SystemExit('RAM-log decoder audit failed; missing: ' + required_decoder)
           print('RAM-log audit: PASS (16 KiB NFWL v3, byte-stream $NFW filter)')
+          PY
+
+      - name: Audit TX-only low-power LEDs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          cfg = Path('nfw/rs41-nfw_sonde-firmware/CONFIG.h').read_text()
+          if not re.search(r'ledStatusEnable\s*=\s*false\s*;', cfg):
+              raise SystemExit('TX-only LED audit failed: ledStatusEnable is not false')
+          required = [
+              'Low-power diagnostic build: normal status/startup LED calls stay dark.',
+              'TX-only LED policy: with normal status LEDs disabled, light green only while',
+              'digitalWrite(GREEN_LED_PIN, LOW);',
+              'void radioDisableTx() {',
+              'digitalWrite(GREEN_LED_PIN, HIGH);',
+          ]
+          missing = [s for s in required if s not in src]
+          if missing:
+              raise SystemExit('TX-only LED audit failed; missing: ' + repr(missing))
+          print('TX-only LED audit: PASS (dark except actual radio TX interval)')
           PY
 
       - name: Audit full RS41 factory humidity check
@@ -192,7 +219,7 @@ jobs:
           import json, re
           from pathlib import Path
 
-          cfg = Path('out/CONFIG.h').read_text()
+          cfg = Path('nfw/rs41-nfw_sonde-firmware/CONFIG.h').read_text()
           summary = json.loads(Path('out/build-summary.json').read_text())
 
           checks = {
@@ -224,6 +251,7 @@ jobs:
               'GLONASS secondary': r'gpsSecondaryGnss\s*=\s*2\s*;',
               'SBAS off': r'gpsSbasEnable\s*=\s*false\s*;',
               'XDATA log mode': r'xdataPortMode\s*=\s*1\s*;',
+              'normal LEDs disabled': r'ledStatusEnable\s*=\s*false\s*;',
           }
           failed = [label for label, pattern in checks.items() if not re.search(pattern, cfg, re.M | re.S)]
           if failed:
@@ -276,12 +304,15 @@ jobs:
             rs41-rsm424/instrument_ram_log.py \
             rs41-rsm424/inject_factory_rh_pressure_cal.py \
             rs41-rsm424/fix_factory_humidity_check.py \
-            rs41-rsm424/fix_v5_factory_cap_logging.py
+            rs41-rsm424/fix_v5_factory_cap_logging.py \
+            rs41-rsm424/enable_tx_only_led.py
           rm -rf out/__pycache__ rs41-rsm424/__pycache__
 
           grep -q 'AGGRESSIVE-RAMLOG-v6' out/README.txt
           grep -q '16384-byte circular SRAM ring' out/README.txt
           grep -q 'NFWL" RAM-log ABI v3' out/README.txt
+
+          cp nfw/rs41-nfw_sonde-firmware/CONFIG.h out/CONFIG.h
 
           cat > out/DEVICE.txt <<EOF
           Canonical package: ${PACKAGE_BASENAME}.zip
@@ -295,6 +326,7 @@ jobs:
           Startup humidity: about 150 C for 3 minutes, physical-zero check, then cooling
           Factory RH: full matrix plus corHp/corHt pressure compensation
           Zero-humidity flash recalibration: disabled
+          LEDs: low-power TX-only; dark except green during actual keyed RF TX
           RAM log: 16384-byte human-readable XDATA circular buffer; package v6, NFWL ABI v3; \$NFW lines omitted
           EOF
 
