@@ -3,8 +3,8 @@
 
 The pinned NFW factory-RH path already carries calibU/matrixU but omits the
 additional corHp[3] and corHt[12] fields used by the reference rs1729/DF9DQ
-RS41 humidity calculation.  They live in the same factory calibration
-subframe at offsets 0x2A6 and 0x2BA.
+RS41 humidity calculation. They live in the same factory calibration subframe
+at offsets 0x2A6 and 0x2BA.
 """
 from __future__ import annotations
 
@@ -56,6 +56,11 @@ insert = (
 )
 cfg = cfg[:end] + insert + cfg[end:]
 config_path.write_text(cfg, encoding="utf-8")
+
+# build_config.py writes /out/CONFIG.h before this injector runs. Refresh that
+# audit/package copy after injection so CI verifies and ships the exact CONFIG.h
+# that the compiler actually consumed.
+Path("/out/CONFIG.h").write_text(cfg, encoding="utf-8")
 
 out = {
     "sensor_boom_serial": serial,
