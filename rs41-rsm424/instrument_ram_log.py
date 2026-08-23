@@ -2,7 +2,7 @@
 """Instrument RS41-NFW XDATA output with a RAM-resident circular log.
 
 The original XDATA UART remains fully functional. Human-readable XDATA log output
-is mirrored into an 8192-byte ring buffer with stable global symbols so OpenOCD can
+is mirrored into a 16384-byte ring buffer with stable global symbols so OpenOCD can
 recover the actual recent runtime log through SWD/ST-Link.
 
 The periodic bulk $NFW telemetry frame is deliberately *not* copied into the ring:
@@ -15,8 +15,8 @@ recognizes both the current "$NFW|" prefix and the older "$NFW," form, forwards
 all bytes unchanged to the physical XDATA UART, and suppresses only those complete
 $NFW lines from the RAM ring. A counter records how many $NFW frames were omitted.
 
-A magic/version pair lets the host-side dumper refuse to decode SRAM unless the
-running firmware is this instrumented diagnostic build.
+RAM-log ABI v3 changes the ring from 8 KiB to 16 KiB. A magic/version pair lets
+the host-side dumper refuse to decode SRAM with an incompatible decoder.
 """
 from pathlib import Path
 import sys
@@ -38,9 +38,9 @@ replacement = r'''// XDATA (2,3)          rx    tx
 // Filtering is byte-stream/line oriented because Arduino Print commonly routes
 // print(String/char*) through write(uint8_t) one byte at a time.
 // Symbols are intentionally global and non-static for ELF/OpenOCD discovery.
-constexpr uint32_t NFW_RAM_LOG_SIZE = 8192;
+constexpr uint32_t NFW_RAM_LOG_SIZE = 16384;
 volatile uint32_t nfwRamLogMagic __attribute__((used)) = 0x4E46574C;    // ASCII "NFWL"
-volatile uint32_t nfwRamLogVersion __attribute__((used)) = 2;
+volatile uint32_t nfwRamLogVersion __attribute__((used)) = 3;
 volatile uint32_t nfwRamLogWrite = 0;
 volatile uint32_t nfwRamLogTotal = 0;
 volatile uint32_t nfwRamLogNfwFramesOmitted = 0;
@@ -65,7 +65,7 @@ class XDataRamLogSerial : public Print {
     // Runtime writes deliberately keep these host-visible identity symbols in
     // the LTO-linked image and restore their known values on every XDATA start.
     nfwRamLogMagic = 0x4E46574C;
-    nfwRamLogVersion = 2;
+    nfwRamLogVersion = 3;
     resetLineFilter();
     hw.begin(baud);
   }
@@ -159,4 +159,4 @@ XDataRamLogSerial xdataSerial(xdataHardwareSerial);
 
 s = s.replace(needle, replacement, 1)
 p.write_text(s, encoding="utf-8")
-print("Injected 8192-byte line-filtered XDATA RAM log; $NFW|/$NFW, frames omitted")
+print("Injected 16384-byte line-filtered XDATA RAM log (NFWL v3); $NFW|/$NFW, frames omitted")
