@@ -120,6 +120,8 @@ def build_config(config_path: Path, serial: str) -> None:
     config = set_scalar(config, "foxHuntMode", False)
     config = set_scalar(config, "lowAltitudeFastTxThreshold", 0)
     config = set_scalar(config, "privateLandingModeEnable", False)
+    # First declaration is the active RSM4x4 branch; the second declaration is
+    # inside the inactive RSM4x2 #else branch and is intentionally left alone.
     config = set_scalar(config, "dataRecorderEnable", False, count=1)
 
     # Keep the serial console available for first-boot verification and RAM-log mirroring.
@@ -140,9 +142,12 @@ def build_config(config_path: Path, serial: str) -> None:
     config = set_scalar(config, "gpsSbasEnable", False)
     config = set_scalar(config, "gpsQzssEnable", False)
 
-    # Aggressive PTU validation: factory temperature check plus full Vaisala-style
-    # humidity reconditioning/check.  Do NOT enable zero-humidity recalibration here:
-    # that mutates the humidity calibration and requires a genuinely dry reference.
+    # Aggressive PTU validation in factory-calibration mode. factoryHumidityCheck()
+    # itself performs the ~one-minute ~138 C reconditioning/heater test and verifies
+    # a bone-dry result; the separate NFW-mode reconditioningEnabled setting is not
+    # executed while FACTORY_CAL_ACTIVE, so leave it false to avoid misleading config.
+    # Do NOT enable zero-humidity recalibration: it mutates calibration and requires a
+    # genuinely dry reference.
     config = set_scalar(config, "sensorBoomEnable", True)
     config = set_scalar(config, "sensorBoomPowerSaving", True)
     config = set_scalar(config, "sensorBoomPowerSavingInterval", 60000)
@@ -150,7 +155,7 @@ def build_config(config_path: Path, serial: str) -> None:
     config = set_scalar(config, "factoryTemperatureCheck", True)
     config = set_scalar(config, "factoryHumidityCheck", True)
     config = set_scalar(config, "humidityModuleEnable", True)
-    config = set_scalar(config, "reconditioningEnabled", True)
+    config = set_scalar(config, "reconditioningEnabled", False)
     config = set_scalar(config, "zeroHumidityCalibration", False)
     config = set_scalar(config, "pressureMode", 1)
 
@@ -171,7 +176,8 @@ def build_config(config_path: Path, serial: str) -> None:
     summary = {
         "firmware_base": "Nevvman18/rs41-nfw@6b3c82936e0f3ebde21e92ee9aaa904087b5c035",
         "board": "RSM424 / RSM4x4 / STM32L412RBT6",
-        "serial": serial,
+        "probe_mainboard_serial": "X0551026",
+        "sensor_boom_calibration_serial": serial,
         "frequency_mhz": 433.9,
         "mode": "Horus Binary V3 4FSK",
         "period_seconds": 60,
@@ -179,10 +185,11 @@ def build_config(config_path: Path, serial: str) -> None:
         "tx_power_nominal_dbm": 8,
         "payload_callsign": "AK5Z",
         "factory_temperature_check": True,
-        "factory_humidity_check": True,
-        "startup_reconditioning": True,
+        "factory_humidity_check_with_reconditioning": True,
+        "separate_nfw_reconditioning": False,
         "zero_humidity_recalibration": False,
         "ram_debug_ring_bytes": 4096,
+        "ram_debug_omits_bulk_nfw_frames": True,
         "factory_calibration": metadata,
     }
     Path("/out/build-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
