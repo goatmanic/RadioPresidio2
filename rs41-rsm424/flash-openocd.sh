@@ -128,11 +128,15 @@ printf '\nProtection/boot checks passed. Programming X0551026 / boom X0852387...
 "${OPENOCD[@]}" \
   -c "adapter speed 50; program {$BIN} verify reset exit 0x08000000"
 
-printf '\nVerifying application execution after reset...\n'
-RUNINFO="$("${OPENOCD[@]}" -c 'adapter speed 50; init; reset run; sleep 3000; halt 3000; echo [capture "reg pc"]; resume; shutdown' 2>&1 || true)"
+# The program command already reset and started the application. Do not issue a
+# second reset here: the aggressive humidity check begins at boot and its first
+# startup log is what we want to preserve. Attach to the already-running target,
+# let it continue for three seconds, halt briefly only to sample PC, then resume.
+printf '\nVerifying application execution without restarting the startup check...\n'
+RUNINFO="$("${OPENOCD[@]}" -c 'adapter speed 50; init; sleep 3000; halt 3000; echo [capture "reg pc"]; resume; shutdown' 2>&1 || true)"
 printf '%s\n' "$RUNINFO"
 if ! grep -Eq 'pc \(/32\): 0x080[0-1][0-9a-fA-F]{4}' <<<"$RUNINFO"; then
-    printf 'ERROR: application PC was not confirmed in 0x08000000-0x0801FFFF after reset.\n' >&2
+    printf 'ERROR: application PC was not confirmed in 0x08000000-0x0801FFFF after programming.\n' >&2
     exit 3
 fi
-printf 'Application execution confirmed in main flash.\n'
+printf 'Application execution confirmed in main flash; startup check was not restarted.\n'
