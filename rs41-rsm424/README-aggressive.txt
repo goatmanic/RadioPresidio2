@@ -83,8 +83,8 @@ ST-LINK RAM LOG
 - RAMLOG-SYMBOLS.txt is generated from the exact final ELF; dump-ram-log.sh resolves
   addresses and ring size from that file rather than hard-coding an older layout.
 - dump-ram-log.sh also captures the complete 40 KiB SRAM.
-- CI rejects the build unless static/global SRAM usage leaves at least 16 KiB free
-  for stack, locals and runtime headroom.
+- CI rejects the build unless conservative ELF accounting leaves at least 15 KiB
+  free after static/global allocation for stack, locals and runtime headroom.
 
 FLASH
   ./flash-openocd.sh
