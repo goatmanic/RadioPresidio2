@@ -55,7 +55,13 @@ class XDataRamLogSerial : public Print {
  public:
   explicit XDataRamLogSerial(HardwareSerial &serial) : hw(serial) {}
 
-  void begin(unsigned long baud) { hw.begin(baud); }
+  void begin(unsigned long baud) {
+    // Runtime writes deliberately keep these host-visible identity symbols in
+    // the LTO-linked image and restore their known values on every XDATA start.
+    nfwRamLogMagic = 0x4E46574C;
+    nfwRamLogVersion = 2;
+    hw.begin(baud);
+  }
   int available() { return hw.available(); }
   int read() { return hw.read(); }
   int peek() { return hw.peek(); }
