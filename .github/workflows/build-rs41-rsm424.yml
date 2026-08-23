@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+env:
+  PROBE_SERIAL: X0551026
+  SENSOR_BOOM_SERIAL: X0852387
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -37,6 +41,8 @@ jobs:
 
           docker run --rm \
             --entrypoint /bin/bash \
+            -e PROBE_SERIAL="$PROBE_SERIAL" \
+            -e SENSOR_BOOM_SERIAL="$SENSOR_BOOM_SERIAL" \
             -v "$GITHUB_WORKSPACE/nfw:/src" \
             -v "$GITHUB_WORKSPACE/rs41-rsm424:/job:ro" \
             -v "$GITHUB_WORKSPACE/out:/out" \
@@ -54,9 +60,12 @@ jobs:
                 cat /src/fw/arduino-ide_variant-files/boards.txt >> "$CORE/boards.txt"
               fi
 
+              printf "Probe serial: %s\nSensor-boom calibration serial: %s\n" \
+                "$PROBE_SERIAL" "$SENSOR_BOOM_SERIAL"
+
               python3 /job/build_config.py \
                 /src/rs41-nfw_sonde-firmware/CONFIG.h \
-                X1323885
+                "$SENSOR_BOOM_SERIAL"
 
               arduino-cli compile \
                 --fqbn "STMicroelectronics:stm32:GenL4:pnum=GENERIC_L412RBTXP,opt=osstd" \
@@ -64,19 +73,36 @@ jobs:
                 /src/rs41-nfw_sonde-firmware
             '
 
-      - name: Verify build products
+      - name: Verify and name build products
         run: |
           set -euo pipefail
           find out -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
-          BIN="$(find out -maxdepth 1 -type f -name '*.bin' -print -quit)"
-          test -n "$BIN"
-          test -s "$BIN"
-          sha256sum "$BIN" | tee out/SHA256SUMS
+
+          ORIGINAL_BIN="$(find out -maxdepth 1 -type f -name '*.bin' -print -quit)"
+          test -n "$ORIGINAL_BIN"
+          test -s "$ORIGINAL_BIN"
+
+          FINAL_BIN="out/${PROBE_SERIAL}-${SENSOR_BOOM_SERIAL}-RSM424-AK5Z-433900-HorusV3.bin"
+          cp -- "$ORIGINAL_BIN" "$FINAL_BIN"
+          test -s "$FINAL_BIN"
+
+          cat > out/DEVICE.txt <<EOF
+          Probe / main electronics: ${PROBE_SERIAL}
+          Sensor boom / calibration: ${SENSOR_BOOM_SERIAL}
+          Board: RSM424 / STM32L412RBT6
+          Frequency: 433.900 MHz
+          Mode: Horus Binary V3
+          Callsign: AK5Z
+          Period: 60 seconds, GPS-clock aligned
+          EOF
+
+          sha256sum "$FINAL_BIN" | tee out/SHA256SUMS
+          stat -- "$FINAL_BIN"
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RSM424-AK5Z-433900-HorusV3
+          name: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3
           path: out/
           if-no-files-found: error
           retention-days: 14
