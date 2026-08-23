@@ -210,7 +210,7 @@ jobs:
           Period: 60 seconds, GPS-clock aligned
           Startup PTU: factory temperature check + factory humidity reconditioning/check
           Zero-humidity recalibration: disabled
-          RAM log: 8192-byte human-readable XDATA circular buffer; package v3, NFWL ABI v2; $NFW|/$NFW, lines omitted
+          RAM log: 8192-byte human-readable XDATA circular buffer; package v3, NFWL ABI v2; \$NFW|/\$NFW, lines omitted
           EOF
 
           echo '--- final artifact contents ---'
