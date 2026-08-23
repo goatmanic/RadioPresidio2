@@ -1,0 +1,247 @@
+name: Analyze RPM411 factory LED
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/analyze-rpm411-led.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch public RPM411 dump and hardware files
+        run: |
+          set -euo pipefail
+          mkdir -p rpm411-analysis
+          cd rpm411-analysis
+          curl -fL --retry 3 --connect-timeout 15 \
+            https://analogic.cz/rs41-rpm411/rs41-rpm411.dump.non-locking.bin \
+            -o rs41-rpm411.dump.non-locking.bin
+          git clone --depth 1 https://github.com/TjarkG/RPM411.git hw
+          stat -c 'dump size: %s bytes' rs41-rpm411.dump.non-locking.bin
+          sha256sum rs41-rpm411.dump.non-locking.bin
+
+      - name: Install analysis tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends binutils-arm-none-eabi
+          python3 -m pip install --user capstone
+
+      - name: Analyze LED wiring and factory firmware
+        run: |
+          set -euo pipefail
+          cd rpm411-analysis
+          arm-none-eabi-objdump -D -b binary -marm -Mforce-thumb \
+            --adjust-vma=0x08000000 rs41-rpm411.dump.non-locking.bin > disasm.txt
+
+          python3 - <<'PY' | tee analysis.txt
+          from pathlib import Path
+          import re, struct, hashlib
+          from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB
+          from capstone.arm import ARM_OP_MEM, ARM_REG_PC
+
+          fw = Path('rs41-rpm411.dump.non-locking.bin').read_bytes()
+          pcb = Path('hw/schematic/RPM411.kicad_pcb').read_text(errors='replace')
+          sch = Path('hw/schematic/RPM411.kicad_sch').read_text(errors='replace')
+          BASE = 0x08000000
+
+          print('=== FIRMWARE ===')
+          print('size', len(fw))
+          print('sha256', hashlib.sha256(fw).hexdigest())
+          if len(fw) < 8:
+              raise SystemExit('firmware too small')
+          msp, reset = struct.unpack_from('<II', fw, 0)
+          print(f'MSP=0x{msp:08x} reset=0x{reset:08x}')
+
+          # Extract balanced top-level footprint blocks from the KiCad PCB.
+          def blocks(text, token='(footprint '):
+              pos = 0
+              while True:
+                  start = text.find(token, pos)
+                  if start < 0: return
+                  depth = 0
+                  i = start
+                  quoted = False
+                  esc = False
+                  while i < len(text):
+                      c = text[i]
+                      if quoted:
+                          if esc: esc = False
+                          elif c == '\\': esc = True
+                          elif c == '"': quoted = False
+                      else:
+                          if c == '"': quoted = True
+                          elif c == '(': depth += 1
+                          elif c == ')':
+                              depth -= 1
+                              if depth == 0:
+                                  yield text[start:i+1]
+                                  pos = i + 1
+                                  break
+                      i += 1
+                  else: return
+
+          netm = re.search(r'\(net\s+(\d+)\s+"LED"\)', pcb)
+          if not netm:
+              raise SystemExit('No net named LED in RPM411 PCB')
+          led_net = int(netm.group(1))
+          print('\n=== HARDWARE LED NET ===')
+          print('LED net number:', led_net)
+
+          ref_blocks = {}
+          for b in blocks(pcb):
+              m = re.search(r'\(fp_text\s+reference\s+"?([^"\s\)]+)"?', b)
+              if not m:
+                  m = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', b)
+              if m:
+                  ref_blocks[m.group(1)] = b
+
+          # Find every footprint touching the LED net and identify its pad.
+          touches = []
+          for ref,b in ref_blocks.items():
+              lines = b.splitlines()
+              for i,line in enumerate(lines):
+                  if f'(net {led_net} "LED")' in line:
+                      pad = '?'
+                      for j in range(i, max(-1, i-8), -1):
+                          pm = re.search(r'\(pad\s+"?(\d+)"?', lines[j])
+                          if pm:
+                              pad = pm.group(1); break
+                      touches.append((ref,pad))
+          print('footprints touching LED:', touches)
+
+          u1 = ref_blocks.get('U1','')
+          u1_led_pads = []
+          for m in re.finditer(r'\(pad\s+"?(\d+)"?[\s\S]{0,900}?\(net\s+%d\s+"LED"\)' % led_net, u1):
+              u1_led_pads.append(int(m.group(1)))
+          print('U1 pads directly on LED net:', sorted(set(u1_led_pads)))
+
+          # In this board the MCU can reach LED through a resistor, so find resistor
+          # blocks that touch LED and report their opposite net and the corresponding U1 pad.
+          linked_u1_pads = set(u1_led_pads)
+          for ref,pad in touches:
+              if not ref.startswith(('R','L','FB')): continue
+              b = ref_blocks[ref]
+              nets = [(int(n), name) for n,name in re.findall(r'\(net\s+(\d+)\s+"([^"]+)"\)', b)]
+              print(f'{ref}: nets={nets}')
+              for n,name in nets:
+                  mm = re.fullmatch(r'Net-\(U1-Pad(\d+)\)', name)
+                  if mm:
+                      linked_u1_pads.add(int(mm.group(1)))
+
+          pinmap48 = {
+            2:'PC13',3:'PC14',4:'PC15',5:'PD0',6:'PD1',10:'PA0',11:'PA1',12:'PA2',13:'PA3',14:'PA4',15:'PA5',16:'PA6',17:'PA7',
+            18:'PB0',19:'PB1',20:'PB2',21:'PB10',22:'PB11',25:'PB12',26:'PB13',27:'PB14',28:'PB15',29:'PA8',30:'PA9',31:'PA10',32:'PA11',33:'PA12',34:'PA13',37:'PA14',38:'PA15',39:'PB3',40:'PB4',41:'PB5',42:'PB6',43:'PB7',45:'PB8',46:'PB9'
+          }
+          led_gpio = []
+          for p in sorted(linked_u1_pads):
+              if p in pinmap48:
+                  led_gpio.append(pinmap48[p])
+                  print(f'candidate LED MCU physical pin {p} -> {pinmap48[p]}')
+          if not led_gpio:
+              print('WARNING: no MCU LED GPIO inferred from PCB')
+
+          # Dump printable strings; useful for finding menu/LED diagnostic functions.
+          print('\n=== STRINGS CONTAINING LED / TEST / PRESSURE ===')
+          cur = bytearray(); start = 0
+          strings=[]
+          for i,b in enumerate(fw+b'\x00'):
+              if 32 <= b < 127:
+                  if not cur: start=i
+                  cur.append(b)
+              else:
+                  if len(cur)>=4:
+                      s=cur.decode('ascii','ignore'); strings.append((start,s))
+                  cur.clear()
+          for off,s in strings:
+              if re.search(r'led|test|press|baro|rpm|menu', s, re.I):
+                  print(f'0x{BASE+off:08x}: {s[:180]}')
+
+          # Literal-address inventory.
+          gpio_base = {'A':0x40010800,'B':0x40010C00,'C':0x40011000,'D':0x40011400,'E':0x40011800}
+          interesting = set(gpio_base.values())
+          for base in gpio_base.values():
+              interesting.update(base+x for x in (0x00,0x04,0x08,0x0c,0x10,0x14))
+          interesting.update([0x40021000,0x40021018,0x4002101c,0x4002201c])
+          print('\n=== RAW LITERAL OCCURRENCES ===')
+          for val in sorted(interesting):
+              pat=struct.pack('<I',val)
+              hits=[i for i in range(0,len(fw)-3) if fw[i:i+4]==pat]
+              if hits:
+                  print(f'0x{val:08x}:', ' '.join(f'0x{BASE+h:08x}' for h in hits))
+
+          # Capstone Thumb pass: locate literal LDRs that resolve to GPIO/RCC addresses,
+          # and generic GPIO SetBits/ResetBits-style stores to BSRR/BRR.
+          md=Cs(CS_ARCH_ARM, CS_MODE_THUMB); md.detail=True
+          insns=list(md.disasm(fw, BASE))
+          idx={ins.address:i for i,ins in enumerate(insns)}
+          candidates=[]
+          gpio_stores=[]
+          for k,ins in enumerate(insns):
+              if ins.mnemonic.startswith('ldr') and len(ins.operands)>=2 and ins.operands[1].type==ARM_OP_MEM and ins.operands[1].mem.base==ARM_REG_PC:
+                  litaddr=((ins.address+4)&~3)+ins.operands[1].mem.disp
+                  off=litaddr-BASE
+                  if 0<=off<=len(fw)-4:
+                      val=struct.unpack_from('<I',fw,off)[0]
+                      if val in interesting:
+                          candidates.append((k,ins,val,litaddr))
+              if ins.mnemonic.startswith('str') and '#0x10]' in ins.op_str or ins.mnemonic.startswith('str') and '#0x14]' in ins.op_str:
+                  gpio_stores.append((k,ins))
+
+          def context(k,n=7):
+              lo=max(0,k-n); hi=min(len(insns),k+n+1)
+              return '\n'.join(f'  {x.address:08x}: {x.mnemonic:8s} {x.op_str}' for x in insns[lo:hi])
+
+          print('\n=== CODE THAT LOADS GPIO/RCC LITERALS ===')
+          for k,ins,val,lit in candidates:
+              print(f'\nload 0x{val:08x} via literal 0x{lit:08x}')
+              print(context(k,5))
+
+          print('\n=== BSRR/BRR-LIKE STORES ===')
+          for k,ins in gpio_stores[:200]:
+              print('\n'+context(k,5))
+
+          # Search common bit masks for inferred LED GPIO(s).
+          print('\n=== LED PIN MASK SEARCH ===')
+          for gp in led_gpio:
+              port=gp[1]
+              bit=int(gp[2:])
+              mask=1<<bit
+              print(f'{gp}: port base=0x{gpio_base[port]:08x} mask=0x{mask:04x}')
+              p16=struct.pack('<H',mask)
+              p32=struct.pack('<I',mask)
+              h16=[BASE+i for i in range(len(fw)-1) if fw[i:i+2]==p16]
+              h32=[BASE+i for i in range(len(fw)-3) if fw[i:i+4]==p32]
+              print('  16-bit mask hits:', ' '.join(f'0x{x:08x}' for x in h16[:80]))
+              print('  32-bit mask hits:', ' '.join(f'0x{x:08x}' for x in h32[:80]))
+
+          print('\n=== KNOWN ANALOGIC LOCATIONS ===')
+          print('setup: 0x08000100')
+          print('locking function: 0x08001e16')
+          PY
+
+          echo '=== disassembly around setup ===' | tee -a analysis.txt
+          sed -n '/08000100/,/08000280/p' disasm.txt | head -220 | tee -a analysis.txt
+
+          echo '=== binary strings ===' > strings.txt
+          strings -a -t x rs41-rpm411.dump.non-locking.bin >> strings.txt
+
+      - name: Upload analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm411-led-analysis
+          path: |
+            rpm411-analysis/analysis.txt
+            rpm411-analysis/disasm.txt
+            rpm411-analysis/strings.txt
+            rpm411-analysis/rs41-rpm411.dump.non-locking.bin
+          retention-days: 7
