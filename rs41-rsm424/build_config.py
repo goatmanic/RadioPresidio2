@@ -122,12 +122,11 @@ def build_config(config_path: Path, serial: str) -> None:
     config = set_scalar(config, "privateLandingModeEnable", False)
     config = set_scalar(config, "dataRecorderEnable", False, count=1)
 
-    # Keep the serial console available for first-boot verification.
+    # Keep the serial console available for first-boot verification and RAM-log mirroring.
     config = set_scalar(config, "xdataPortMode", 1)
     config = set_scalar(config, "ledStatusEnable", True)
 
     # GPS remains in intelligent/cyclic tracking so every packet has current UTC and position.
-    # This first production-safe build does not attempt the unproven once-daily full power-off scheme.
     config = set_scalar(config, "gpsOperationMode", 2)
     config = set_scalar(config, "m10ConstellationOptimization", True)
     config = set_scalar(config, "m10AggressiveOpt", False)
@@ -138,22 +137,24 @@ def build_config(config_path: Path, serial: str) -> None:
     config = set_scalar(config, "ubloxGpsAirborneMode", False)
     config = set_scalar(config, "gpsDynamicModel", 2)  # stationary
     config = set_scalar(config, "gpsSecondaryGnss", 2)  # GLONASS; compatible with cyclic tracking
-    config = set_scalar(config, "gpsSbasEnable", False)  # required for M10 cyclic tracking
+    config = set_scalar(config, "gpsSbasEnable", False)
     config = set_scalar(config, "gpsQzssEnable", False)
 
-    # Measure the original PTU boom once per transmitted frame and use the RPM411 pressure board.
+    # Aggressive PTU validation: factory temperature check plus full Vaisala-style
+    # humidity reconditioning/check.  Do NOT enable zero-humidity recalibration here:
+    # that mutates the humidity calibration and requires a genuinely dry reference.
     config = set_scalar(config, "sensorBoomEnable", True)
     config = set_scalar(config, "sensorBoomPowerSaving", True)
     config = set_scalar(config, "sensorBoomPowerSavingInterval", 60000)
     config = set_scalar(config, "sensorCalibrationMode", 2)
     config = set_scalar(config, "factoryTemperatureCheck", True)
-    config = set_scalar(config, "factoryHumidityCheck", False)
+    config = set_scalar(config, "factoryHumidityCheck", True)
     config = set_scalar(config, "humidityModuleEnable", True)
-    config = set_scalar(config, "reconditioningEnabled", False)
+    config = set_scalar(config, "reconditioningEnabled", True)
     config = set_scalar(config, "zeroHumidityCalibration", False)
     config = set_scalar(config, "pressureMode", 1)
 
-    # No continuous heaters for stationary long-runtime use.
+    # No continuous heaters after the startup validation sequence.
     config = set_scalar(config, "referenceHeating", False)
     config = set_scalar(config, "humidityModuleHeating", False)
     config = set_scalar(config, "heatersPowerOptimisation", True)
@@ -177,6 +178,11 @@ def build_config(config_path: Path, serial: str) -> None:
         "tx_power_setting": 3,
         "tx_power_nominal_dbm": 8,
         "payload_callsign": "AK5Z",
+        "factory_temperature_check": True,
+        "factory_humidity_check": True,
+        "startup_reconditioning": True,
+        "zero_humidity_recalibration": False,
+        "ram_debug_ring_bytes": 4096,
         "factory_calibration": metadata,
     }
     Path("/out/build-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
