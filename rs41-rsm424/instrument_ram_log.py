@@ -2,13 +2,16 @@
 """Instrument RS41-NFW XDATA output with a RAM-resident circular log.
 
 The original XDATA UART remains fully functional. Human-readable XDATA log output
-is mirrored into a 4096-byte ring buffer with stable global symbols so OpenOCD can
+is mirrored into an 8192-byte ring buffer with stable global symbols so OpenOCD can
 recover the actual recent runtime log through SWD/ST-Link.
 
 The periodic bulk $NFW telemetry frame is deliberately *not* copied into the ring:
 it can exceed 1 KB and is emitted repeatedly during calibration loops, which would
 otherwise overwrite the startup diagnostics we are trying to preserve. A counter
 records how many $NFW frames were omitted from the ring.
+
+A magic/version pair lets the host-side dumper refuse to decode SRAM unless the
+running firmware is this instrumented diagnostic build.
 """
 from pathlib import Path
 import sys
@@ -29,7 +32,9 @@ replacement = r'''// XDATA (2,3)          rx    tx
 // Periodic bulk $NFW telemetry frames are intentionally omitted from the ring;
 // otherwise they would overwrite the useful startup/calibration log within seconds.
 // Symbols are intentionally global and non-static for ELF/OpenOCD discovery.
-constexpr uint32_t NFW_RAM_LOG_SIZE = 4096;
+constexpr uint32_t NFW_RAM_LOG_SIZE = 8192;
+uint32_t nfwRamLogMagic = 0x4E46574C;    // ASCII "NFWL"
+uint32_t nfwRamLogVersion = 2;
 volatile uint32_t nfwRamLogWrite = 0;
 volatile uint32_t nfwRamLogTotal = 0;
 volatile uint32_t nfwRamLogNfwFramesOmitted = 0;
@@ -84,4 +89,4 @@ XDataRamLogSerial xdataSerial(xdataHardwareSerial);
 
 s = s.replace(needle, replacement, 1)
 p.write_text(s, encoding="utf-8")
-print("Injected 4096-byte XDATA human-log ring ($NFW bulk frames omitted)")
+print("Injected 8192-byte XDATA human-log ring with magic/version ($NFW bulk frames omitted)")
