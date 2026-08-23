@@ -14,7 +14,7 @@ permissions:
 env:
   PROBE_SERIAL: X0551026
   SENSOR_BOOM_SERIAL: X0852387
-  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v2
+  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v3
 
 jobs:
   build:
@@ -86,6 +86,27 @@ jobs:
               test "$RING_SIZE" = "00002000"
               test "$(wc -l < /out/RAMLOG-SYMBOLS.txt)" -eq 6
             '
+
+      - name: Audit byte-stream RAM-log filter
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          required = [
+              "filterRamByte(b);",
+              "for (size_t i = 0; i < size; ++i) filterRamByte(buffer[i]);",
+              "case 4: return b == '|' || b == ',';",
+              "nfwRamLogNfwFramesOmitted++;",
+              "if (b == '\\n') resetLineFilter();",
+          ]
+          missing = [s for s in required if s not in src]
+          if missing:
+              raise SystemExit('RAM-log byte-stream filter audit failed; missing: ' + repr(missing))
+          if "buffer[4] == ','" in src:
+              raise SystemExit('RAM-log filter audit failed: obsolete bulk-only comma detector still present')
+          print('RAM-log byte-stream filter audit: PASS ($NFW| and $NFW, suppressed from RAM)')
+          PY
 
       - name: Audit generated configuration
         run: |
@@ -189,7 +210,7 @@ jobs:
           Period: 60 seconds, GPS-clock aligned
           Startup PTU: factory temperature check + factory humidity reconditioning/check
           Zero-humidity recalibration: disabled
-          RAM log: 8192-byte human-readable XDATA circular buffer, NFWL v2; bulk \$NFW frames omitted
+          RAM log: 8192-byte human-readable XDATA circular buffer; package v3, NFWL ABI v2; $NFW|/$NFW, lines omitted
           EOF
 
           echo '--- final artifact contents ---'
