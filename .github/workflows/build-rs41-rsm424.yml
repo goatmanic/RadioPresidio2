@@ -311,8 +311,7 @@ jobs:
           grep -q 'AGGRESSIVE-RAMLOG-v6' out/README.txt
           grep -q '16384-byte circular SRAM ring' out/README.txt
           grep -q 'NFWL" RAM-log ABI v3' out/README.txt
-
-          cp nfw/rs41-nfw_sonde-firmware/CONFIG.h out/CONFIG.h
+          grep -q 'ledStatusEnable.*false' out/CONFIG.h
 
           cat > out/DEVICE.txt <<EOF
           Canonical package: ${PACKAGE_BASENAME}.zip
