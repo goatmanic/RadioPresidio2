@@ -13,20 +13,49 @@ Policy:
 This is deliberately RSM4x4/M10-only. It does not alter the RSM4x2 path.
 """
 from pathlib import Path
+import json
+import re
 import sys
 
-if len(sys.argv) != 2:
-    raise SystemExit(f"Usage: {sys.argv[0]} rs41-nfw_sonde-firmware.ino")
+if len(sys.argv) != 3:
+    raise SystemExit(f"Usage: {sys.argv[0]} CONFIG.h rs41-nfw_sonde-firmware.ino")
 
-path = Path(sys.argv[1])
+cfg_path = Path(sys.argv[1])
+path = Path(sys.argv[2])
+
+# The ordinary NFW 60-second PSMCT policy must not run in parallel with the daily
+# host-controlled PSMOO policy. Initial acquisition therefore stays FULL/continuous.
+cfg = cfg_path.read_text(encoding="utf-8")
+pattern = r"^(\s*(?:(?:constexpr|const|static|volatile)\s+)*bool\s+m10CyclicTracking\s*=\s*)(true|false)(\s*;)"
+cfg, n = re.subn(pattern, r"\g<1>false\g<3>", cfg, count=1, flags=re.MULTILINE)
+if n != 1:
+    raise SystemExit(f"m10CyclicTracking config: expected one match, got {n}")
+cfg_path.write_text(cfg, encoding="utf-8")
+
+# Keep the packaged CONFIG exactly equal to what the compiler consumes.
+out_cfg = Path("/out/CONFIG.h")
+if out_cfg.parent.exists():
+    out_cfg.write_text(cfg, encoding="utf-8")
+
+# Publish the power policy in the reproducible build metadata too.
+summary_path = Path("/out/build-summary.json")
+if summary_path.exists():
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["gps_policy"] = "initial valid fix -> host-controlled M10 PSMOO -> UART-silent 24h -> wake/relock -> PSMOO"
+    summary["gps_daily_relock_seconds"] = 86400
+    summary["gps_sleep_mode"] = "M10 PSMOO"
+    summary["gps_sleep_host_controlled"] = True
+    summary["gps_packet_utc_free_runs_between_relocks"] = True
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
 src = path.read_text(encoding="utf-8")
 
 
 def replace_one(old: str, new: str, label: str) -> None:
     global src
-    n = src.count(old)
-    if n != 1:
-        raise SystemExit(f"{label}: expected exactly one source match, got {n}")
+    matches = src.count(old)
+    if matches != 1:
+        raise SystemExit(f"{label}: expected exactly one source match, got {matches}")
     src = src.replace(old, new, 1)
 
 
