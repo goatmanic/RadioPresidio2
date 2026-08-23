@@ -23,6 +23,12 @@ cfg, n = re.subn(pattern, r"\g<1>false\g<3>", cfg, count=1, flags=re.MULTILINE)
 if n != 1:
     raise SystemExit(f"Expected one ledStatusEnable setting, got {n}")
 cfg_path.write_text(cfg, encoding="utf-8")
+# build_config.py/inject_factory_rh_pressure_cal.py maintain a packaged audit copy
+# under /out. Refresh it here after the final CONFIG mutation so CONFIG.h shipped
+# in the artifact is byte-for-byte the one consumed by the compiler.
+out_cfg = Path("/out/CONFIG.h")
+if out_cfg.parent.is_dir():
+    out_cfg.write_text(cfg, encoding="utf-8")
 
 src = ino_path.read_text(encoding="utf-8")
 
