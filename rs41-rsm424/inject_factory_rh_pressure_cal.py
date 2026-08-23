@@ -72,4 +72,22 @@ out = {
 Path("/out/factory-rh-pressure-corrections.json").write_text(
     json.dumps(out, indent=2) + "\n", encoding="utf-8"
 )
+
+# Keep the human/machine-readable build summary synchronized with the exact v5
+# calculation and test that the compiler receives.
+summary_path = Path("/out/build-summary.json")
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+summary.update({
+    "diagnostic_package_revision": 5,
+    "factory_humidity_model": "calibU + matrixU + corHp/corHt pressure-temperature correction",
+    "factory_humidity_check_basis": "10-sample physical-zero correction: measured hot sensor-local factory RH minus expected hot RH from preheat ambient vapor pressure",
+    "factory_humidity_reconditioning_target_c": 150,
+    "factory_humidity_reconditioning_dwell_seconds": 180,
+    "factory_humidity_zero_samples": 10,
+    "factory_humidity_zero_correction_limit_rh": 2.0,
+    "factory_humidity_cooling_after_check": True,
+    "factory_humidity_pressure_coefficients": out,
+})
+summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
 print(json.dumps(out, indent=2))
