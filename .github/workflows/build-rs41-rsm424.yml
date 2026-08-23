@@ -14,7 +14,7 @@ permissions:
 env:
   PROBE_SERIAL: X0551026
   SENSOR_BOOM_SERIAL: X0852387
-  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v4
+  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v5
 
 jobs:
   build:
@@ -68,10 +68,17 @@ jobs:
                 /src/rs41-nfw_sonde-firmware/CONFIG.h \
                 "$SENSOR_BOOM_SERIAL"
 
+              python3 /job/inject_factory_rh_pressure_cal.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                "$SENSOR_BOOM_SERIAL"
+
               python3 /job/instrument_ram_log.py \
                 /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
 
               python3 /job/fix_factory_humidity_check.py \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              python3 /job/fix_v5_factory_cap_logging.py \
                 /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
 
               arduino-cli compile \
@@ -108,29 +115,58 @@ jobs:
               raise SystemExit('RAM-log byte-stream filter audit failed; missing: ' + repr(missing))
           if "buffer[4] == ','" in src:
               raise SystemExit('RAM-log filter audit failed: obsolete bulk-only comma detector still present')
-          print('RAM-log byte-stream filter audit: PASS ($NFW| and $NFW, suppressed from RAM)')
+          print('RAM-log byte-stream filter audit: PASS')
           PY
 
-      - name: Audit heated factory humidity check
+      - name: Audit full RS41 factory humidity check
         run: |
           set -euo pipefail
           python3 - <<'PY'
+          import json, math, re
           from pathlib import Path
+
           src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
-          required = [
+          cfg = Path('out/CONFIG.h').read_text()
+          corr = json.loads(Path('out/factory-rh-pressure-corrections.json').read_text())
+
+          required_src = [
               'float factoryRhSensorLocal = -1.0f;',
+              'float factoryRhCorrectedCp = 0.0f;',
+              'float factoryRhRawCap = 0.0f;',
+              'factoryCorHp[j]',
+              'factoryCorHt[4 * j + k]',
+              'Cp -= corrCp;',
               'factoryRhSensorLocal = rh;',
-              'const float localRh = factoryRhSensorLocal;',
-              '[info]: humidity CHECK dry sample ',
-              '[err]: humidity CHECK FAILED - sensor-local dry reading ',
-              '[info]: humidity CHECK passed - sensor-local dry reading ',
+              'const float reconditioningTargetC = 150.0f;',
+              'const unsigned long reconditioningDwellMs = 180000UL;',
+              'humidity CHECK 3-minute hot dwell started',
+              'humidity CHECK zero sample ',
+              'factoryVaporSatP(preheatAirT) / factoryVaporSatP(extHeaterTemperatureValue)',
+              'capSum += factoryRhRawCap;',
+              'physical-zero correction ',
+              'humidity CHECK cooling after reconditioning',
           ]
-          missing = [s for s in required if s not in src]
+          missing = [s for s in required_src if s not in src]
           if missing:
-              raise SystemExit('Factory humidity-domain audit failed; missing: ' + repr(missing))
-          if 'rhSum += humidityValue; rhCount++;' in src:
-              raise SystemExit('Factory humidity-domain audit failed: old ambient-equivalent dry-check remains')
-          print('Factory humidity-domain audit: PASS (hot/dry test uses sensor-local matrix RH)')
+              raise SystemExit('Factory humidity v5 audit failed; missing: ' + repr(missing))
+          forbidden = [
+              'rhSum += humidityValue; rhCount++;',
+              'millis() - reached115Millis >= 30000',
+              'extHeaterHandler(true, 138, extHeaterTemperatureValue)',
+          ]
+          present = [s for s in forbidden if s in src]
+          if present:
+              raise SystemExit('Factory humidity v5 audit found obsolete logic: ' + repr(present))
+
+          if not re.search(r'const\s+float\s+factoryCorHp\[3\]\s*=\s*\{', cfg):
+              raise SystemExit('factoryCorHp[3] missing from CONFIG.h')
+          if not re.search(r'const\s+float\s+factoryCorHt\[12\]\s*=\s*\{', cfg):
+              raise SystemExit('factoryCorHt[12] missing from CONFIG.h')
+          assert corr['sensor_boom_serial'] == 'X0852387'
+          assert len(corr['corHp']) == 3 and len(corr['corHt']) == 12
+          assert all(math.isfinite(float(x)) for x in corr['corHp'] + corr['corHt'])
+          print('Full RS41 factory humidity v5 audit: PASS')
+          print(json.dumps(corr, indent=2))
           PY
 
       - name: Audit generated configuration
@@ -148,7 +184,7 @@ jobs:
               'RSM4x2 disabled': r'^//\s*#define\s+RSM4x2\b',
               'Horus V3 enabled': r'constexpr\s+bool\s+horusV3Enable\s*=\s*true\s*;',
               'Horus V3 period 60': r'horusV3TimeSyncSeconds\s*=\s*60\s*;',
-              '433.900 MHz only in Horus V3 table': r'horusV3FreqTable\[\]\s*=\s*\{433\.9\}\s*;',
+              '433.900 MHz only': r'horusV3FreqTable\[\]\s*=\s*\{433\.9\}\s*;',
               'AK5Z callsign': r'#define\s+HORUS_V3_CALLSIGN\s+"AK5Z"',
               'Horus V3 power 3': r'horusV3RadioPower\s*=\s*3\s*;',
               'Horus V2 disabled': r'horusEnable\s*=\s*false\s*;',
@@ -173,10 +209,7 @@ jobs:
               'SBAS off': r'gpsSbasEnable\s*=\s*false\s*;',
               'XDATA log mode': r'xdataPortMode\s*=\s*1\s*;',
           }
-          failed = []
-          for label, pattern in checks.items():
-              if not re.search(pattern, cfg, re.M | re.S):
-                  failed.append(label)
+          failed = [label for label, pattern in checks.items() if not re.search(pattern, cfg, re.M | re.S)]
           if failed:
               raise SystemExit('Configuration audit failed: ' + ', '.join(failed))
 
@@ -187,6 +220,7 @@ jobs:
           assert cal['subframe_serial'] == 'X0852387'
           assert cal['mainboard'] == 'RSM424'
           assert cal['mainboard_serial'] == 'X0551026'
+          assert summary['period_seconds'] == 60
           assert summary['ram_debug_ring_bytes'] == 8192
           assert summary['ram_debug_version'] == 2
           assert summary['ram_debug_magic'] == 'NFWL'
@@ -197,7 +231,6 @@ jobs:
       - name: Canonicalize and verify build products
         run: |
           set -euo pipefail
-
           ORIGINAL_BIN="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.bin' -print -quit)"
           ORIGINAL_ELF="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.elf' -print -quit)"
           ORIGINAL_HEX="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.hex' -print -quit)"
@@ -221,7 +254,13 @@ jobs:
           chmod 0755 out/flash-openocd.sh out/dump-ram-log.sh out/decode_ram_log.py
           bash -n out/flash-openocd.sh
           bash -n out/dump-ram-log.sh
-          python3 -m py_compile out/decode_ram_log.py rs41-rsm424/build_config.py rs41-rsm424/instrument_ram_log.py rs41-rsm424/fix_factory_humidity_check.py
+          python3 -m py_compile \
+            out/decode_ram_log.py \
+            rs41-rsm424/build_config.py \
+            rs41-rsm424/instrument_ram_log.py \
+            rs41-rsm424/inject_factory_rh_pressure_cal.py \
+            rs41-rsm424/fix_factory_humidity_check.py \
+            rs41-rsm424/fix_v5_factory_cap_logging.py
           rm -rf out/__pycache__ rs41-rsm424/__pycache__
 
           cat > out/DEVICE.txt <<EOF
@@ -232,11 +271,11 @@ jobs:
           Frequency: 433.900 MHz
           Mode: Horus Binary V3
           Callsign: AK5Z
-          Period: 60 seconds, GPS-clock aligned
-          Startup PTU: factory temperature check + heated factory humidity check
-          Humidity dry-check basis: sensor-local factory-matrix RH before ambient vapor-pressure conversion
-          Zero-humidity recalibration: disabled
-          RAM log: 8192-byte human-readable XDATA circular buffer; package v4, NFWL ABI v2; \$NFW|/\$NFW, lines omitted
+          RF period: 60 seconds, GPS-clock aligned
+          Startup humidity: about 150 C for 3 minutes, physical-zero check, then cooling
+          Factory RH: full matrix plus corHp/corHt pressure compensation
+          Zero-humidity flash recalibration: disabled
+          RAM log: 8192-byte human-readable XDATA circular buffer; package v5, NFWL ABI v2; \$NFW lines omitted
           EOF
 
           echo '--- final artifact contents ---'
