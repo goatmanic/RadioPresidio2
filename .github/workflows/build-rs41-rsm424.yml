@@ -14,7 +14,7 @@ permissions:
 env:
   PROBE_SERIAL: X0551026
   SENSOR_BOOM_SERIAL: X0852387
-  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v5
+  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v6
 
 jobs:
   build:
@@ -87,13 +87,22 @@ jobs:
                 /src/rs41-nfw_sonde-firmware
 
               NM="$(find /home/builder/.arduino15/packages/STMicroelectronics/tools -type f -name arm-none-eabi-nm -print -quit)"
+              SIZE="$(find /home/builder/.arduino15/packages/STMicroelectronics/tools -type f -name arm-none-eabi-size -print -quit)"
               test -x "$NM"
+              test -x "$SIZE"
               ELF="$(find /out -maxdepth 1 -type f -name "*.elf" -print -quit)"
               test -n "$ELF"
+
+              STATIC_RAM="$($SIZE "$ELF" | awk "NR==2 {print \$2+\$3}")"
+              FREE_RAM=$((40960 - STATIC_RAM))
+              echo "Static/global SRAM use: ${STATIC_RAM} bytes; free before stack/locals: ${FREE_RAM} bytes"
+              test "$STATIC_RAM" -le 24576
+              test "$FREE_RAM" -ge 16384
+
               "$NM" -S -n "$ELF" | grep -E "nfwRamLog(Magic|Version|NfwFramesOmitted|Write|Total)?$" > /out/RAMLOG-SYMBOLS.txt
               cat /out/RAMLOG-SYMBOLS.txt
               RING_SIZE="$(grep -E " nfwRamLog$" /out/RAMLOG-SYMBOLS.txt | tr -s " " | cut -d " " -f 2)"
-              test "$RING_SIZE" = "00002000"
+              test "$RING_SIZE" = "00004000"
               test "$(wc -l < /out/RAMLOG-SYMBOLS.txt)" -eq 6
             '
 
@@ -103,7 +112,11 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          dec = Path('rs41-rsm424/decode_ram_log.py').read_text()
           required = [
+              "constexpr uint32_t NFW_RAM_LOG_SIZE = 16384;",
+              "nfwRamLogVersion __attribute__((used)) = 3;",
+              "nfwRamLogVersion = 3;",
               "filterRamByte(b);",
               "for (size_t i = 0; i < size; ++i) filterRamByte(buffer[i]);",
               "case 4: return b == '|' || b == ',';",
@@ -115,7 +128,10 @@ jobs:
               raise SystemExit('RAM-log byte-stream filter audit failed; missing: ' + repr(missing))
           if "buffer[4] == ','" in src:
               raise SystemExit('RAM-log filter audit failed: obsolete bulk-only comma detector still present')
-          print('RAM-log byte-stream filter audit: PASS')
+          for required_decoder in ('version != 3', 'len(ring) != 16384', 'RAM-log identity = NFWL v3'):
+              if required_decoder not in dec:
+                  raise SystemExit('RAM-log decoder audit failed; missing: ' + required_decoder)
+          print('RAM-log audit: PASS (16 KiB NFWL v3, byte-stream $NFW filter)')
           PY
 
       - name: Audit full RS41 factory humidity check
@@ -148,7 +164,7 @@ jobs:
           ]
           missing = [s for s in required_src if s not in src]
           if missing:
-              raise SystemExit('Factory humidity v5 audit failed; missing: ' + repr(missing))
+              raise SystemExit('Factory humidity v5/v6 audit failed; missing: ' + repr(missing))
           forbidden = [
               'rhSum += humidityValue; rhCount++;',
               'millis() - reached115Millis >= 30000',
@@ -156,7 +172,7 @@ jobs:
           ]
           present = [s for s in forbidden if s in src]
           if present:
-              raise SystemExit('Factory humidity v5 audit found obsolete logic: ' + repr(present))
+              raise SystemExit('Factory humidity v5/v6 audit found obsolete logic: ' + repr(present))
 
           if not re.search(r'const\s+float\s+factoryCorHp\[3\]\s*=\s*\{', cfg):
               raise SystemExit('factoryCorHp[3] missing from CONFIG.h')
@@ -165,7 +181,7 @@ jobs:
           assert corr['sensor_boom_serial'] == 'X0852387'
           assert len(corr['corHp']) == 3 and len(corr['corHt']) == 12
           assert all(math.isfinite(float(x)) for x in corr['corHp'] + corr['corHt'])
-          print('Full RS41 factory humidity v5 audit: PASS')
+          print('Full RS41 factory humidity v5/v6 audit: PASS')
           print(json.dumps(corr, indent=2))
           PY
 
@@ -221,8 +237,8 @@ jobs:
           assert cal['mainboard'] == 'RSM424'
           assert cal['mainboard_serial'] == 'X0551026'
           assert summary['period_seconds'] == 60
-          assert summary['ram_debug_ring_bytes'] == 8192
-          assert summary['ram_debug_version'] == 2
+          assert summary['ram_debug_ring_bytes'] == 16384
+          assert summary['ram_debug_version'] == 3
           assert summary['ram_debug_magic'] == 'NFWL'
           assert summary['ram_debug_omits_bulk_nfw_frames'] is True
           print('Generated configuration audit: PASS')
@@ -263,6 +279,10 @@ jobs:
             rs41-rsm424/fix_v5_factory_cap_logging.py
           rm -rf out/__pycache__ rs41-rsm424/__pycache__
 
+          grep -q 'AGGRESSIVE-RAMLOG-v6' out/README.txt
+          grep -q '16384-byte circular SRAM ring' out/README.txt
+          grep -q 'NFWL" RAM-log ABI v3' out/README.txt
+
           cat > out/DEVICE.txt <<EOF
           Canonical package: ${PACKAGE_BASENAME}.zip
           Probe / main electronics: ${PROBE_SERIAL}
@@ -275,7 +295,7 @@ jobs:
           Startup humidity: about 150 C for 3 minutes, physical-zero check, then cooling
           Factory RH: full matrix plus corHp/corHt pressure compensation
           Zero-humidity flash recalibration: disabled
-          RAM log: 8192-byte human-readable XDATA circular buffer; package v5, NFWL ABI v2; \$NFW lines omitted
+          RAM log: 16384-byte human-readable XDATA circular buffer; package v6, NFWL ABI v3; \$NFW lines omitted
           EOF
 
           echo '--- final artifact contents ---'
