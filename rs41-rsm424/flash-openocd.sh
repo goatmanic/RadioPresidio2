@@ -9,24 +9,27 @@ command -v openocd >/dev/null || {
     exit 1
 }
 
-mapfile -t BINS < <(find "$HERE" -maxdepth 1 -type f \
-    -name 'RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v3.bin' -print)
-if (( ${#BINS[@]} != 1 )); then
-    printf 'ERROR: expected exactly one canonical aggressive firmware binary in %s; found %d.\n' \
-        "$HERE" "${#BINS[@]}" >&2
-    printf '%s\n' "${BINS[@]:-}" >&2
-    exit 1
-fi
-BIN="${BINS[0]}"
-
 [[ -r "$SUMS" ]] || {
     printf 'ERROR: checksum file not found: %s\n' "$SUMS" >&2
     exit 1
 }
 
-EXPECTED="$(awk -v name="$(basename -- "$BIN")" '$2 == name || $2 == "out/" name {print $1; exit}' "$SUMS")"
+# The canonical binary name comes from SHA256SUMS so this helper does not need
+# another source change every time the diagnostic package version increments.
+BIN_NAME="$(awk 'NF >= 2 {name=$2; sub(/^\*/, "", name); sub(/^out\//, "", name); print name; exit}' "$SUMS")"
+[[ "$BIN_NAME" == *.bin ]] || {
+    printf 'ERROR: could not resolve canonical .bin filename from %s.\n' "$SUMS" >&2
+    exit 1
+}
+BIN="$HERE/$BIN_NAME"
+[[ -r "$BIN" ]] || {
+    printf 'ERROR: firmware binary named by checksum file is missing: %s\n' "$BIN" >&2
+    exit 1
+}
+
+EXPECTED="$(awk -v name="$BIN_NAME" '{n=$2; sub(/^\*/, "", n); sub(/^out\//, "", n); if (n == name) {print $1; exit}}' "$SUMS")"
 [[ "$EXPECTED" =~ ^[0-9a-fA-F]{64}$ ]] || {
-    printf 'ERROR: no checksum for %s in %s.\n' "$(basename -- "$BIN")" "$SUMS" >&2
+    printf 'ERROR: no valid checksum for %s in %s.\n' "$BIN_NAME" "$SUMS" >&2
     exit 1
 }
 ACTUAL="$(sha256sum -- "$BIN" | awk '{print $1}')"
@@ -48,7 +51,7 @@ probe_target() {
       2>&1
 }
 
-printf 'Firmware: %s\n' "$(basename -- "$BIN")"
+printf 'Firmware: %s\n' "$BIN_NAME"
 printf 'Checksum OK: %s\n' "$ACTUAL"
 printf 'Checking STM32L412 protection and boot state...\n'
 
