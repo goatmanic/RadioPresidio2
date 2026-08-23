@@ -33,8 +33,8 @@ replacement = r'''// XDATA (2,3)          rx    tx
 // otherwise they would overwrite the useful startup/calibration log within seconds.
 // Symbols are intentionally global and non-static for ELF/OpenOCD discovery.
 constexpr uint32_t NFW_RAM_LOG_SIZE = 8192;
-uint32_t nfwRamLogMagic = 0x4E46574C;    // ASCII "NFWL"
-uint32_t nfwRamLogVersion = 2;
+volatile uint32_t nfwRamLogMagic __attribute__((used)) = 0x4E46574C;    // ASCII "NFWL"
+volatile uint32_t nfwRamLogVersion __attribute__((used)) = 2;
 volatile uint32_t nfwRamLogWrite = 0;
 volatile uint32_t nfwRamLogTotal = 0;
 volatile uint32_t nfwRamLogNfwFramesOmitted = 0;
