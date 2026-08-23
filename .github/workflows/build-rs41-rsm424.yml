@@ -162,7 +162,8 @@ jobs:
           rm -- "$ORIGINAL_BIN" "$ORIGINAL_ELF" "$ORIGINAL_HEX" "$ORIGINAL_MAP"
 
           test "$(stat -c %s "out/${PACKAGE_BASENAME}.bin")" -le 131072
-          sha256sum "out/${PACKAGE_BASENAME}.bin" | tee out/SHA256SUMS
+          (cd out && sha256sum "${PACKAGE_BASENAME}.bin" > SHA256SUMS)
+          cat out/SHA256SUMS
 
           cp rs41-rsm424/flash-openocd.sh out/flash-openocd.sh
           cp rs41-rsm424/dump-ram-log.sh out/dump-ram-log.sh
@@ -172,6 +173,7 @@ jobs:
           bash -n out/flash-openocd.sh
           bash -n out/dump-ram-log.sh
           python3 -m py_compile out/decode_ram_log.py rs41-rsm424/build_config.py rs41-rsm424/instrument_ram_log.py
+          rm -rf out/__pycache__ rs41-rsm424/__pycache__
 
           cat > out/DEVICE.txt <<EOF
           Canonical package: ${PACKAGE_BASENAME}.zip
