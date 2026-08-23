@@ -10,7 +10,7 @@ command -v openocd >/dev/null || {
 }
 
 mapfile -t BINS < <(find "$HERE" -maxdepth 1 -type f \
-    -name 'RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v2.bin' -print)
+    -name 'RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v3.bin' -print)
 if (( ${#BINS[@]} != 1 )); then
     printf 'ERROR: expected exactly one canonical aggressive firmware binary in %s; found %d.\n' \
         "$HERE" "${#BINS[@]}" >&2
