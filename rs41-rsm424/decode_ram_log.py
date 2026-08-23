@@ -16,12 +16,15 @@ if magic != 0x4E46574C:
         f"RAM-log magic mismatch: got 0x{magic:08x}, expected 0x4e46574c (NFWL). "
         "The connected probe is not running this diagnostic build, or the symbol file does not match it."
     )
-if version != 2:
-    raise SystemExit(f"RAM-log version mismatch: got {version}, expected 2")
+if version != 3:
+    raise SystemExit(f"RAM-log version mismatch: got {version}, expected 3")
 
 ring = Path("X0551026-ramlog-ring.bin").read_bytes()
-if len(ring) != 8192:
-    raise SystemExit(f"Unexpected RAM ring size: {len(ring)}; expected 8192")
+# ABI v3 deliberately derives the ring size from the exact ELF/symbol-driven dump
+# instead of baking one size into the chronology logic. Guard the expected v6 size
+# so a stale or corrupt symbol file still fails loudly.
+if len(ring) != 16384:
+    raise SystemExit(f"Unexpected RAM ring size: {len(ring)}; expected 16384 for NFWL v3")
 
 total = read_u32("X0551026-ramlog-total.bin")
 write = read_u32("X0551026-ramlog-write.bin") % len(ring)
@@ -34,7 +37,8 @@ else:
 
 Path("X0551026-ramlog-chronological.bin").write_bytes(chronological)
 
-print("RAM-log identity = NFWL v2")
+print("RAM-log identity = NFWL v3")
+print(f"RAM-log ring size = {len(ring)} bytes")
 print(f"nfwRamLogTotal = {total}")
 print(f"nfwRamLogWrite = {write}")
 print(f"bulk $NFW frames omitted from ring = {omitted}")
