@@ -97,7 +97,10 @@ jobs:
           EOF
 
           sha256sum "$FINAL_BIN" | tee out/SHA256SUMS
-          stat -- "$FINAL_BIN"
+          cp rs41-rsm424/flash-openocd.sh out/flash-openocd.sh
+          chmod 0755 out/flash-openocd.sh
+          bash -n out/flash-openocd.sh
+          stat -- "$FINAL_BIN" out/flash-openocd.sh
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
