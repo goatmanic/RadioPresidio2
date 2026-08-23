@@ -13,9 +13,8 @@ WHY v6 EXISTS
   evidence that this physical boom is bad.
 - v5 performs a substantially more faithful RS41 ground check and exposes the raw
   quantities needed to distinguish a real sensor offset from bad firmware math.
-- v6 keeps the v5 PTU/radio behavior but doubles the ST-Link RAM-log ring from
-  8 KiB to 16 KiB so the complete long ground-check sequence is retained much
-  longer before ordinary circular-buffer overwrite begins.
+- v6 keeps the v5 PTU/radio behavior, doubles the ST-Link RAM-log ring from 8 KiB
+  to 16 KiB, and uses a low-power TX-only LED policy.
 
 FACTORY CALIBRATION / HUMIDITY MODEL
 - Vaisala factory calibration for sensor boom X0852387 is loaded from its complete
@@ -68,6 +67,15 @@ NORMAL RADIO / FLIGHT CONFIGURATION
 - APRS, Horus V2, RTTY, Morse, PIP, fox-hunt, private landing and active RSM4x4
   data recorder: disabled
 - Continuous reference/humidity heating: disabled after startup validation
+
+LOW-POWER LED POLICY
+- Normal status LEDs are disabled, including startup/calibration/status blinking.
+- Both LEDs remain electrically OFF while idle.
+- The green LED turns ON only inside radioEnableTx(), after the transmitter is keyed,
+  and turns OFF inside radioDisableTx(). This makes it an actual-RF TX indicator,
+  rather than a scheduler/status indicator.
+- Because the LED hook is at the Si4032 TX gate, the policy remains correct if another
+  RF mode is later enabled: any real keyed transmission gets the green indication.
 
 ST-LINK RAM LOG
 - Human-readable XDATA output is mirrored into a 16384-byte circular SRAM ring.
