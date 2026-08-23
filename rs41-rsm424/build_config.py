@@ -188,7 +188,9 @@ def build_config(config_path: Path, serial: str) -> None:
         "factory_humidity_check_with_reconditioning": True,
         "separate_nfw_reconditioning": False,
         "zero_humidity_recalibration": False,
-        "ram_debug_ring_bytes": 4096,
+        "ram_debug_ring_bytes": 8192,
+        "ram_debug_version": 2,
+        "ram_debug_magic": "NFWL",
         "ram_debug_omits_bulk_nfw_frames": True,
         "factory_calibration": metadata,
     }
