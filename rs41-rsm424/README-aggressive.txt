@@ -31,10 +31,13 @@ Normal runtime configuration
 - Continuous reference/humidity heating: disabled after startup validation
 
 ST-LINK RAM LOG
-- Human-readable XDATA output is mirrored into a 4096-byte circular SRAM ring.
+- Human-readable XDATA output is mirrored into an 8192-byte circular SRAM ring.
 - The periodic bulk $NFW telemetry frames are deliberately NOT copied into the
   ring because they would overwrite calibration diagnostics within seconds.
 - A counter records how many $NFW frames were omitted.
+- The running firmware exposes magic "NFWL" and RAM-log version 2. The decoder
+  refuses to interpret SRAM if those markers do not match, preventing an old or
+  mismatched firmware image from being mistaken for this diagnostic build.
 - RAMLOG-SYMBOLS.txt is generated from the exact ELF on every CI build.
 - dump-ram-log.sh resolves addresses from that symbol file; it does not hard-code
   addresses from an older build.
@@ -44,7 +47,8 @@ FLASH
 
 The flash helper verifies SHA-256, RDP0, no WRP, and software boot from main flash
 (nBOOT0=1, nSWBOOT0=0), then programs/verifies and confirms the PC is executing
-inside 0x08000000-0x0801FFFF after reset.
+inside 0x08000000-0x0801FFFF without issuing a second reset. This preserves the
+first aggressive humidity-check run and its RAM log.
 
 READ THE LIVE RAM LOG
   ./dump-ram-log.sh
