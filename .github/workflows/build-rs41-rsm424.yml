@@ -82,7 +82,8 @@ jobs:
               test -n "$ELF"
               "$NM" -S -n "$ELF" | grep -E "nfwRamLog(NfwFramesOmitted|Write|Total)?$" > /out/RAMLOG-SYMBOLS.txt
               cat /out/RAMLOG-SYMBOLS.txt
-              test "$(awk '$NF=="nfwRamLog" {print $2}' /out/RAMLOG-SYMBOLS.txt)" = "00001000"
+              RING_SIZE="$(grep -E " nfwRamLog$" /out/RAMLOG-SYMBOLS.txt | tr -s " " | cut -d " " -f 2)"
+              test "$RING_SIZE" = "00001000"
               test "$(wc -l < /out/RAMLOG-SYMBOLS.txt)" -eq 4
             '
 
