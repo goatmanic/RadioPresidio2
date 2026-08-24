@@ -125,13 +125,15 @@ jobs:
           if missing:
               raise SystemExit('v12 source audit missing: ' + repr(missing))
 
+          # Generic TIM2 register use is legitimate in upstream PTU acquisition.
+          # Forbid only identifiers/operations introduced by the failed v9-v11
+          # low-power wall-clock implementations.
           forbidden = [
               'uwTick +=',
               'HAL_SuspendTick()',
-              'TIM2->PSC',
-              'TIM2->ARR',
               'NFW_LP_TIM2_CLOCK_HZ',
               'NFW_LP_TIMER_HZ',
+              'NFW_LP_TIM2_PSC',
               'nfwLpClockDownTo2MHz',
               'RCC_MSIRANGE_5',
           ]
