@@ -95,10 +95,9 @@ bool nfwLpSleepMs(uint32_t sleepMs) {
   TIM2->DIER = TIM_DIER_UIE;
   TIM2->CR1 = TIM_CR1_OPM | TIM_CR1_CEN;
 
-  HAL_SuspendTick();
-
   // HSI is not SYSCLK on RSM424; it only supplies the RPM411 MCO. Stop it while
-  // asleep. If it cannot be stopped, abort safely without manufacturing time.
+  // SysTick is still running: HAL_RCC_OscConfig() uses HAL_GetTick() for its
+  // HSI transition timeout, so the timeout source must never be frozen here.
   if (!nfwLpSetHsi(false)) {
     TIM2->CR1 &= ~TIM_CR1_CEN;
     TIM2->DIER = 0;
@@ -106,9 +105,11 @@ bool nfwLpSleepMs(uint32_t sleepMs) {
     NVIC_ClearPendingIRQ(TIM2_IRQn);
     if (tim2IrqWasEnabled) NVIC_EnableIRQ(TIM2_IRQn);
     SCB->SCR = oldScr;
-    HAL_ResumeTick();
     return false;
   }
+
+  // Freeze Arduino/HAL logical time only for the actual CPU sleep interval.
+  HAL_SuspendTick();
 
   // Clear stale event state then enter ordinary SLEEP. SYSCLK remains 80 MHz,
   // but the Cortex core is stopped until TIM2 produces the wake event.
@@ -127,13 +128,7 @@ bool nfwLpSleepMs(uint32_t sleepMs) {
   SCB->SCR = oldScr;
   if (tim2IrqWasEnabled) NVIC_EnableIRQ(TIM2_IRQn);
 
-  // Restore RPM411 MCO before any PTU/pressure refresh.
-  if (!nfwLpSetHsi(true)) {
-    // HSE/PLL/SysTick are still intact, so keep the MCU alive and let normal
-    // diagnostics expose the pressure failure rather than corrupting wall time.
-  }
-
-  // SysTick interrupts were disabled for the entire TIM2 interval. Advance the
+  // SysTick interrupts were disabled for the TIM2 sleep interval. Advance the
   // HAL/Arduino tick by exactly the interval represented by the 80 MHz TIM2.
   if (timerFired) {
     uwTick += sleepMs;
@@ -141,6 +136,13 @@ bool nfwLpSleepMs(uint32_t sleepMs) {
     nfwLpSleptMs += sleepMs;
   }
   HAL_ResumeTick();
+
+  // Restore RPM411 MCO with a live HAL tick so oscillator timeout handling is
+  // safe even if HSI unexpectedly fails to become ready.
+  if (!nfwLpSetHsi(true)) {
+    // HSE/PLL/SysTick are still intact, so keep the MCU alive and let normal
+    // diagnostics expose the pressure failure rather than corrupting wall time.
+  }
 
   return timerFired;
 }
@@ -222,6 +224,7 @@ if summary_path.exists():
     summary["mcu_idle_rpm411_mco_paused"] = True
     summary["mcu_idle_advances_hal_tick"] = True
     summary["mcu_idle_owns_tim2_isr"] = False
+    summary["hsi_transitions_use_live_hal_tick"] = True
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 print("Applied RSM424 v10 stable-clock low-power sleep")
