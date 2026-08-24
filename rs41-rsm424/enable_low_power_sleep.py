@@ -78,7 +78,9 @@ extern "C" void TIM2_IRQHandler(void) {
   }
 }
 
-static bool nfwLpClockDownTo2MHz() {
+// Do not mark the sketch helpers static: Arduino's sketch preprocessor emits
+// external forward prototypes before compiling the generated .cpp file.
+bool nfwLpClockDownTo2MHz() {
   RCC_OscInitTypeDef osc = {};
   RCC_ClkInitTypeDef clk = {};
 
@@ -115,7 +117,7 @@ static bool nfwLpClockDownTo2MHz() {
   return true;
 }
 
-static void nfwLpRestore80MHz() {
+void nfwLpRestore80MHz() {
   // The project's clock_override.cpp supplies the exact RSM424 24 MHz HSE ->
   // PLL -> 80 MHz configuration and explicitly re-enables HSI for RPM411 MCO.
   SystemClock_Config();
@@ -127,7 +129,7 @@ static void nfwLpRestore80MHz() {
   }
 }
 
-static bool nfwLpSleepMs(uint32_t sleepMs) {
+bool nfwLpSleepMs(uint32_t sleepMs) {
   if (sleepMs < 2UL || sleepMs > NFW_LP_MAX_SLEEP_MS) return false;
 
   // Finish pending output before changing peripheral clocks.  GPS is already in
@@ -202,7 +204,7 @@ static bool nfwLpSleepMs(uint32_t sleepMs) {
   return nfwLpTimerFired;
 }
 
-static uint32_t nfwLpSecondsToNextHorusSlot() {
+uint32_t nfwLpSecondsToNextHorusSlot() {
   const uint32_t period = (uint32_t)horusV3TimeSyncSeconds;
   if (period < 5UL) return 0UL;
   const uint32_t now = dailyGpsUtcNowSeconds();
@@ -210,7 +212,7 @@ static uint32_t nfwLpSecondsToNextHorusSlot() {
   return (phase == 0UL) ? 0UL : (period - phase);
 }
 
-static void nfwLowPowerIdleBetweenPackets() {
+void nfwLowPowerIdleBetweenPackets() {
   // Initial GNSS acquisition and every daily relock remain fully awake.  This is
   // important both for acquisition performance and because dailyGpsUtcNowSeconds
   // only becomes a stable free-running clock after the first accepted fix.
