@@ -117,12 +117,15 @@ jobs:
               '.timeOfDaySeconds  = dailyGpsUtcNowSeconds(),',
               'static constexpr uint32_t NFW_LP_CLOCK_HZ = 2000000UL;',
               'static constexpr uint32_t NFW_LP_TX_GUARD_SECONDS = 30UL;',
-              'extern "C" void TIM2_IRQHandler(void)',
+              'SCB->SCR |= SCB_SCR_SEVONPEND_Msk;',
+              'NVIC_DisableIRQ(TIM2_IRQn);',
               'osc.MSIClockRange = RCC_MSIRANGE_5;',
               'off.HSEState = RCC_HSE_OFF;',
               'off.HSIState = RCC_HSI_OFF;',
               'HAL_PWREx_EnableLowPowerRunMode();',
-              'HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI);',
+              'HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFE);',
+              'const bool timerFired = (TIM2->SR & TIM_SR_UIF) != 0;',
+              'SCB->SCR &= ~SCB_SCR_SEVONPEND_Msk;',
               '(void)HAL_PWREx_DisableLowPowerRunMode();',
               'uwTick += sleepMs;',
               'pressureHandler();',
@@ -133,6 +136,9 @@ jobs:
           missing = [s for s in required_src if s not in src]
           if missing:
               raise SystemExit('source audit missing: ' + repr(missing))
+
+          if 'extern "C" void TIM2_IRQHandler(void) {' in src:
+              raise SystemExit('v9 must not define a competing TIM2 IRQ handler')
 
           checks = {
               'RSM4x4': r'^#define\s+RSM4x4\b',
@@ -158,10 +164,11 @@ jobs:
           assert summary['gps_sleep_mode'] == 'M10 PSMOO'
           assert summary['mcu_idle_clock_hz'] == 2000000
           assert summary['mcu_active_guard_before_tx_seconds'] == 30
-          assert summary['mcu_idle_timer'] == 'TIM2 one-shot at 1kHz'
+          assert summary['mcu_idle_timer'] == 'TIM2 one-shot at 1kHz, SEVONPEND/WFE event wake'
           assert summary['mcu_idle_hse_pll_off'] is True
           assert summary['mcu_idle_hsi_off'] is True
           assert summary['mcu_idle_advances_hal_tick'] is True
+          assert summary['mcu_idle_owns_tim2_isr'] is False
           assert summary['probe_mainboard_serial'] == 'X0551026'
           assert summary['sensor_boom_calibration_serial'] == 'X0852387'
           assert corr['sensor_boom_serial'] == 'X0852387'
@@ -217,7 +224,7 @@ jobs:
           Callsign: AK5Z
           RF period: 300 seconds (5 minutes), offset 0
           GPS: initial valid fix -> M10 PSMOO inactive -> UART-silent 86400 s -> wake/relock -> inactive
-          MCU idle: 2 MHz MSI low-power sleep outside final 30 s before each RF slot; TIM2 one-shot wake
+          MCU idle: 2 MHz MSI low-power sleep outside final 30 s before each RF slot; TIM2 event wake
           Idle clocks: HSE/PLL/HSI off; normal 80 MHz clock tree restored on wake
           RPM411/PTU: refreshed in pre-TX guard; pressure enabled
           Startup humidity: about 150 C for 3 minutes, physical-zero check, then cooling
