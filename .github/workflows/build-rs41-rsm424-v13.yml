@@ -1,0 +1,291 @@
+name: Build RS41 RSM424 v13 24MHz Range2 low-power
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rs41-rsm424/**"
+      - ".github/workflows/build-rs41-rsm424-v13.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PROBE_SERIAL: X0551026
+  SENSOR_BOOM_SERIAL: X0852387
+  TX_PERIOD_SECONDS: 300
+  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-LOWPOWER-v13-24MHz-R2
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out build recipe
+        uses: actions/checkout@v4
+
+      - name: Fetch pinned RS41-NFW source
+        run: |
+          git clone https://github.com/Nevvman18/rs41-nfw.git nfw
+          git -C nfw checkout 6b3c82936e0f3ebde21e92ee9aaa904087b5c035
+          test "$(git -C nfw rev-parse HEAD)" = "6b3c82936e0f3ebde21e92ee9aaa904087b5c035"
+
+      - name: Build pinned compiler image
+        run: docker build -t rs41-nfw-builder nfw/rs41-nfw_souding-software/backend
+
+      - name: Configure patch compile and measure
+        run: |
+          mkdir -p out
+          chmod -R a+rwX nfw out
+
+          docker run --rm \
+            --entrypoint /bin/bash \
+            -e PROBE_SERIAL="$PROBE_SERIAL" \
+            -e SENSOR_BOOM_SERIAL="$SENSOR_BOOM_SERIAL" \
+            -e TX_PERIOD_SECONDS="$TX_PERIOD_SECONDS" \
+            -v "$GITHUB_WORKSPACE/nfw:/src" \
+            -v "$GITHUB_WORKSPACE/rs41-rsm424:/job:ro" \
+            -v "$GITHUB_WORKSPACE/out:/out" \
+            rs41-nfw-builder -lc '
+              set -euo pipefail
+              export HOME=/home/builder
+              CORE=/home/builder/.arduino15/packages/STMicroelectronics/hardware/stm32/2.10.1
+              VARIANT_SRC="/src/fw/arduino-ide_variant-files/variants/STM32L4xx/L412RB(I-T)xP"
+              VARIANT_DST="$CORE/variants/STM32L4xx/L412RB(I-T)xP"
+
+              rm -rf "$VARIANT_DST"
+              cp -a "$VARIANT_SRC" "$VARIANT_DST"
+              if ! grep -q "GENERIC_L412RBTXP" "$CORE/boards.txt"; then
+                printf "\n" >> "$CORE/boards.txt"
+                cat /src/fw/arduino-ide_variant-files/boards.txt >> "$CORE/boards.txt"
+              fi
+
+              python3 /job/build_config.py /src/rs41-nfw_sonde-firmware/CONFIG.h "$SENSOR_BOOM_SERIAL"
+              python3 /job/set_tx_period.py /src/rs41-nfw_sonde-firmware/CONFIG.h "$TX_PERIOD_SECONDS" /out
+              python3 /job/inject_factory_rh_pressure_cal.py /src/rs41-nfw_sonde-firmware/CONFIG.h "$SENSOR_BOOM_SERIAL"
+              python3 /job/instrument_ram_log.py /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+              python3 /job/fix_factory_humidity_check.py /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+              python3 /job/fix_v5_factory_cap_logging.py /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+              python3 /job/enable_tx_only_led.py /src/rs41-nfw_sonde-firmware/CONFIG.h /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+              python3 /job/enable_daily_gps_relock.py /src/rs41-nfw_sonde-firmware/CONFIG.h /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+              python3 /job/enable_low_power_sleep_v12.py /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+              python3 /job/set_fixed_24mhz_range2.py \
+                /src/rs41-nfw_sonde-firmware/clock_override.cpp \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              arduino-cli compile \
+                --fqbn "STMicroelectronics:stm32:GenL4:pnum=GENERIC_L412RBTXP,opt=osstd" \
+                --output-dir /out \
+                /src/rs41-nfw_sonde-firmware
+
+              NM="$(find /home/builder/.arduino15/packages/STMicroelectronics/tools -type f -name arm-none-eabi-nm -print -quit)"
+              SIZE="$(find /home/builder/.arduino15/packages/STMicroelectronics/tools -type f -name arm-none-eabi-size -print -quit)"
+              ELF="$(find /out -maxdepth 1 -type f -name "*.elf" -print -quit)"
+              test -x "$NM" && test -x "$SIZE" && test -n "$ELF"
+
+              STATIC_RAM="$($SIZE "$ELF" | awk "NR==2 {print \$2+\$3}")"
+              FREE_RAM=$((40960 - STATIC_RAM))
+              echo "Static/global SRAM use: ${STATIC_RAM}; conservative free: ${FREE_RAM}"
+              test "$FREE_RAM" -ge 15000
+
+              "$NM" -S -n "$ELF" | grep -E "nfwRamLog(Magic|Version|NfwFramesOmitted|Write|Total)?$" > /out/RAMLOG-SYMBOLS.txt
+              test "$(grep -E " nfwRamLog$" /out/RAMLOG-SYMBOLS.txt | tr -s " " | cut -d " " -f 2)" = "00004000"
+              test "$(wc -l < /out/RAMLOG-SYMBOLS.txt)" -eq 6
+            '
+
+      - name: Audit exact v13 clock power timing and configuration
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, math, re
+          from pathlib import Path
+
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          clock = Path('nfw/rs41-nfw_sonde-firmware/clock_override.cpp').read_text()
+          cfg = Path('nfw/rs41-nfw_sonde-firmware/CONFIG.h').read_text()
+          packaged_cfg = Path('out/CONFIG.h').read_text()
+          summary = json.loads(Path('out/build-summary.json').read_text())
+          policy = json.loads(Path('out/clock-policy.json').read_text())
+          corr = json.loads(Path('out/factory-rh-pressure-corrections.json').read_text())
+          assert cfg == packaged_cfg
+
+          # Isolate only the L412 clock branch so the unchanged F100 branch cannot
+          # satisfy or violate the v13 clock assertions.
+          m = re.search(
+              r'#if defined\(ARDUINO_GENERIC_L412RBIXP\).*?(?=// ── RSM4x2)',
+              clock,
+              re.S,
+          )
+          if not m:
+              raise SystemExit('could not isolate L412 clock branch')
+          l412 = m.group(0)
+
+          required_clock = [
+              'RCC_OscInitStruct.OscillatorType      = RCC_OSCILLATORTYPE_HSE | RCC_OSCILLATORTYPE_HSI;',
+              'RCC_OscInitStruct.HSEState            = RCC_HSE_ON;',
+              'RCC_OscInitStruct.HSIState            = RCC_HSI_ON;',
+              'RCC_OscInitStruct.PLL.PLLState        = RCC_PLL_OFF;',
+              'RCC_ClkInitStruct.SYSCLKSource        = RCC_SYSCLKSOURCE_HSE;',
+              'RCC_ClkInitStruct.AHBCLKDivider       = RCC_SYSCLK_DIV1;',
+              'RCC_ClkInitStruct.APB1CLKDivider      = RCC_HCLK_DIV1;',
+              'RCC_ClkInitStruct.APB2CLKDivider      = RCC_HCLK_DIV1;',
+              'HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3)',
+              'SystemCoreClock = 24000000UL;',
+              'SysTick_Config(SystemCoreClock / 1000UL);',
+              'HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE2)',
+          ]
+          missing = [x for x in required_clock if x not in l412]
+          if missing:
+              raise SystemExit('v13 clock audit missing: ' + repr(missing))
+          forbidden_clock = [
+              'RCC_PLL_ON',
+              'RCC_SYSCLKSOURCE_PLLCLK',
+              'SystemCoreClock = 80000000UL',
+              'PWR_REGULATOR_VOLTAGE_SCALE1',
+          ]
+          present = [x for x in forbidden_clock if x in l412]
+          if present:
+              raise SystemExit('v13 forbidden L412 clock source present: ' + repr(present))
+
+          required_src = [
+              'static constexpr uint32_t NFW_LP_TX_GUARD_SECONDS = 30UL;',
+              'const unsigned long startMs = millis();',
+              'while ((unsigned long)(millis() - startMs) < sleepMs)',
+              '__WFI();',
+              'const unsigned long elapsedMs = (unsigned long)(millis() - startMs);',
+              'nfwLpSetHsi(false)',
+              'nfwLpSetHsi(true)',
+              '[pwr]: v13 24MHz-R2 systick sleep start req=',
+              '[pwr]: v13 24MHz-R2 systick sleep end elapsed=',
+              '[pwr]: v13 24MHz Range2 sleep armed:',
+              '.timeOfDaySeconds  = dailyGpsUtcNowSeconds(),',
+              'static constexpr unsigned long DAILY_GPS_RELOCK_MS = 86400000UL;',
+          ]
+          missing = [x for x in required_src if x not in src]
+          if missing:
+              raise SystemExit('v13 source audit missing: ' + repr(missing))
+
+          forbidden_src = [
+              'uwTick +=',
+              'HAL_SuspendTick()',
+              'NFW_LP_TIM2_CLOCK_HZ',
+              'NFW_LP_TIM2_PSC',
+              'nfwLpClockDownTo2MHz',
+              'RCC_MSIRANGE_5',
+          ]
+          present = [x for x in forbidden_src if x in src]
+          if present:
+              raise SystemExit('v13 forbidden timing source present: ' + repr(present))
+
+          checks = {
+              'RSM4x4': r'^#define\s+RSM4x4\b',
+              'Horus V3': r'horusV3Enable\s*=\s*true\s*;',
+              '433.900': r'horusV3FreqTable\[\]\s*=\s*\{433\.9\}\s*;',
+              'AK5Z': r'#define\s+HORUS_V3_CALLSIGN\s+"AK5Z"',
+              '100 baud': r'horusV3Bdr\s*=\s*100\s*;',
+              '300 seconds': r'horusV3TimeSyncSeconds\s*=\s*300\s*;',
+              'offset zero': r'horusV3TimeSyncOffsetSeconds\s*=\s*0\s*;',
+              'power 3': r'horusV3RadioPower\s*=\s*3\s*;',
+              'RPM411': r'pressureMode\s*=\s*1\s*;',
+              'M10 ordinary cyclic disabled': r'm10CyclicTracking\s*=\s*false\s*;',
+              'normal LEDs off': r'ledStatusEnable\s*=\s*false\s*;',
+              'APRS off': r'aprsEnable\s*=\s*false\s*;',
+              'Horus V2 off': r'horusEnable\s*=\s*false\s*;',
+          }
+          failed = [name for name, pattern in checks.items() if not re.search(pattern, cfg, re.M)]
+          if failed:
+              raise SystemExit('config audit failed: ' + ', '.join(failed))
+
+          assert summary['period_seconds'] == 300
+          assert summary['gps_daily_relock_seconds'] == 86400
+          assert summary['gps_sleep_mode'] == 'M10 PSMOO'
+          assert summary['mcu_idle_sysclk_hz'] == 24000000
+          assert summary['mcu_clock_source'] == '24MHz HSE direct'
+          assert summary['mcu_pll_enabled'] is False
+          assert summary['mcu_voltage_scaling'] == 'Range 2'
+          assert summary['mcu_flash_latency_ws'] == 3
+          assert summary['mcu_idle_wall_clock'] == 'normal 1ms SysTick / millis(), never suspended'
+          assert summary['mcu_idle_custom_wall_timer'] is False
+          assert summary['mcu_idle_manual_uwtick_adjustment'] is False
+          assert summary['mcu_idle_sysclk_switching'] is False
+          assert summary['mcu_idle_hsi_off'] is True
+          assert summary['mcu_idle_rpm411_mco_paused'] is True
+
+          assert policy['sysclk_source'] == 'HSE direct'
+          assert policy['sysclk_hz'] == 24000000
+          assert policy['pll_enabled'] is False
+          assert policy['voltage_scaling'] == 'Range 2'
+          assert policy['flash_latency_ws'] == 3
+          assert policy['systick_hz'] == 1000
+          assert policy['runtime_sysclk_switching'] is False
+
+          assert corr['sensor_boom_serial'] == 'X0852387'
+          assert all(math.isfinite(float(x)) for x in corr['corHp'] + corr['corHt'])
+          print('v13 24MHz/Range2/SysTick/PTU/RAM/LED/GPS audit: PASS')
+          PY
+
+      - name: Canonicalize and verify products
+        run: |
+          set -euo pipefail
+          ORIGINAL_BIN="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.bin' -print -quit)"
+          ORIGINAL_ELF="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.elf' -print -quit)"
+          ORIGINAL_HEX="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.hex' -print -quit)"
+          ORIGINAL_MAP="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.map' -print -quit)"
+          for f in "$ORIGINAL_BIN" "$ORIGINAL_ELF" "$ORIGINAL_HEX" "$ORIGINAL_MAP"; do test -s "$f"; done
+
+          cp -- "$ORIGINAL_BIN" "out/${PACKAGE_BASENAME}.bin"
+          cp -- "$ORIGINAL_ELF" "out/${PACKAGE_BASENAME}.elf"
+          cp -- "$ORIGINAL_HEX" "out/${PACKAGE_BASENAME}.hex"
+          cp -- "$ORIGINAL_MAP" "out/${PACKAGE_BASENAME}.map"
+          rm -- "$ORIGINAL_BIN" "$ORIGINAL_ELF" "$ORIGINAL_HEX" "$ORIGINAL_MAP"
+          test "$(stat -c %s "out/${PACKAGE_BASENAME}.bin")" -le 131072
+          (cd out && sha256sum "${PACKAGE_BASENAME}.bin" > SHA256SUMS)
+          cat out/SHA256SUMS
+
+          cp rs41-rsm424/flash-openocd.sh out/flash-openocd.sh
+          cp rs41-rsm424/dump-ram-log.sh out/dump-ram-log.sh
+          cp rs41-rsm424/decode_ram_log.py out/decode_ram_log.py
+          cp rs41-rsm424/README-lowpower-v13.txt out/README.txt
+          chmod 0755 out/flash-openocd.sh out/dump-ram-log.sh out/decode_ram_log.py
+          bash -n out/flash-openocd.sh
+          bash -n out/dump-ram-log.sh
+          python3 -m py_compile \
+            out/decode_ram_log.py \
+            rs41-rsm424/enable_daily_gps_relock.py \
+            rs41-rsm424/enable_tx_only_led.py \
+            rs41-rsm424/enable_low_power_sleep_v12.py \
+            rs41-rsm424/set_fixed_24mhz_range2.py \
+            rs41-rsm424/set_tx_period.py
+          rm -rf out/__pycache__ rs41-rsm424/__pycache__
+
+          grep -q '24 MHz physical HSE crystal' out/README.txt
+          grep -q 'Voltage Scaling Range 2' out/README.txt
+          grep -Eq 'horusV3TimeSyncSeconds[[:space:]]*=[[:space:]]*300[[:space:]]*;' out/CONFIG.h
+
+          cat > out/DEVICE.txt <<EOF
+          Canonical package: ${PACKAGE_BASENAME}.zip
+          Probe / main electronics: ${PROBE_SERIAL}
+          Sensor boom / calibration: ${SENSOR_BOOM_SERIAL}
+          Board: RSM424 / STM32L412RBT6
+          Frequency: 433.900 MHz
+          Mode: Horus Binary V3, 100 baud
+          Callsign: AK5Z
+          RF period: 300 seconds (5 minutes), offset 0
+          CPU: fixed 24 MHz HSE direct; PLL off; Voltage Scaling Range 2; Flash 3 WS
+          GPS: initial valid fix -> M10 PSMOO inactive -> UART-silent 86400 s -> wake/relock -> inactive
+          MCU idle: normal 1 ms SysTick wall clock + repeated WFI; no TIM2 wall clock; no manual uwTick adjustment
+          Idle HSI: off, so RPM411 MCO is paused; restored before pressure/PTU refresh
+          RAM log: 16384-byte circular XDATA buffer; NFWL ABI v3
+          EOF
+
+          find out -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+
+      - name: Upload canonical v13 firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_BASENAME }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
