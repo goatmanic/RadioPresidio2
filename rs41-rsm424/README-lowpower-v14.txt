@@ -20,7 +20,7 @@ Root causes fixed in v14
 2. The upstream M10 UBX-CFG-VALSET helper stores configuration in RAM only
    (layer 0x01). u-blox M10 clears RAM in the PSMOO off state, so RAM-only PM
    configuration is not sufficient. v14 writes the daily PSMOO configuration to
-   both RAM and BBR (layer mask 0x03), with OPERATEMODE written last.
+   both RAM + BBR (RAM+BBR, layer mask 0x03), with OPERATEMODE written last.
 
 3. On the first gpsHandler() pass after MCU reset/flash, v14 generates a UART wake
    edge and writes OPERATEMODE=FULL to RAM+BBR. This prevents a PSMOO state retained
