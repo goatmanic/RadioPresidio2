@@ -71,8 +71,8 @@ Other retained configuration
 * aggressive startup humidity reconditioning diagnostic retained
 * zero-humidity flash recalibration disabled
 
-Canonical v14 build
-===================
+Canonical v14 artifact from code-identical build
+=================================================
 CI run: 32813701761
 Artifact ID: 9550704139
 ZIP SHA256: 214ced3117ded7bb3fb4464e8ed9d1e58577f2d53e18bdae3c30258e0bacdc11
