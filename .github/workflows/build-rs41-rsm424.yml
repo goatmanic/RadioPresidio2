@@ -1,0 +1,341 @@
+name: Build RS41 RSM424 433.900 MHz
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rs41-rsm424/**"
+      - ".github/workflows/build-rs41-rsm424.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PROBE_SERIAL: X0551026
+  SENSOR_BOOM_SERIAL: X0852387
+  PACKAGE_BASENAME: RSM424-X0551026-X0852387-AK5Z-433900-HorusV3-AGGRESSIVE-RAMLOG-v6
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out build recipe
+        uses: actions/checkout@v4
+
+      - name: Fetch pinned RS41-NFW source
+        run: |
+          git clone https://github.com/Nevvman18/rs41-nfw.git nfw
+          git -C nfw checkout 6b3c82936e0f3ebde21e92ee9aaa904087b5c035
+          test "$(git -C nfw rev-parse HEAD)" = "6b3c82936e0f3ebde21e92ee9aaa904087b5c035"
+
+      - name: Build pinned NFW compiler image
+        run: |
+          docker build -t rs41-nfw-builder nfw/rs41-nfw_souding-software/backend
+
+      - name: Configure, instrument and compile RSM424 firmware
+        run: |
+          mkdir -p out
+          chmod -R a+rwX nfw out
+
+          docker run --rm \
+            --entrypoint /bin/bash \
+            -e PROBE_SERIAL="$PROBE_SERIAL" \
+            -e SENSOR_BOOM_SERIAL="$SENSOR_BOOM_SERIAL" \
+            -v "$GITHUB_WORKSPACE/nfw:/src" \
+            -v "$GITHUB_WORKSPACE/rs41-rsm424:/job:ro" \
+            -v "$GITHUB_WORKSPACE/out:/out" \
+            rs41-nfw-builder -lc '
+              set -euo pipefail
+              export HOME=/home/builder
+              CORE=/home/builder/.arduino15/packages/STMicroelectronics/hardware/stm32/2.10.1
+              VARIANT_SRC="/src/fw/arduino-ide_variant-files/variants/STM32L4xx/L412RB(I-T)xP"
+              VARIANT_DST="$CORE/variants/STM32L4xx/L412RB(I-T)xP"
+
+              rm -rf "$VARIANT_DST"
+              cp -a "$VARIANT_SRC" "$VARIANT_DST"
+              if ! grep -q "GENERIC_L412RBTXP" "$CORE/boards.txt"; then
+                printf "\n" >> "$CORE/boards.txt"
+                cat /src/fw/arduino-ide_variant-files/boards.txt >> "$CORE/boards.txt"
+              fi
+
+              printf "Probe serial: %s\nSensor-boom calibration serial: %s\n" \
+                "$PROBE_SERIAL" "$SENSOR_BOOM_SERIAL"
+
+              python3 /job/build_config.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                "$SENSOR_BOOM_SERIAL"
+
+              python3 /job/inject_factory_rh_pressure_cal.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                "$SENSOR_BOOM_SERIAL"
+
+              python3 /job/instrument_ram_log.py \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              python3 /job/fix_factory_humidity_check.py \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              python3 /job/fix_v5_factory_cap_logging.py \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              python3 /job/enable_tx_only_led.py \
+                /src/rs41-nfw_sonde-firmware/CONFIG.h \
+                /src/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino
+
+              arduino-cli compile \
+                --fqbn "STMicroelectronics:stm32:GenL4:pnum=GENERIC_L412RBTXP,opt=osstd" \
+                --output-dir /out \
+                /src/rs41-nfw_sonde-firmware
+
+              NM="$(find /home/builder/.arduino15/packages/STMicroelectronics/tools -type f -name arm-none-eabi-nm -print -quit)"
+              SIZE="$(find /home/builder/.arduino15/packages/STMicroelectronics/tools -type f -name arm-none-eabi-size -print -quit)"
+              test -x "$NM"
+              test -x "$SIZE"
+              ELF="$(find /out -maxdepth 1 -type f -name "*.elf" -print -quit)"
+              test -n "$ELF"
+
+              STATIC_RAM="$($SIZE "$ELF" | awk "NR==2 {print \$2+\$3}")"
+              FREE_RAM=$((40960 - STATIC_RAM))
+              echo "Static/global SRAM use: ${STATIC_RAM} bytes; free before stack/locals: ${FREE_RAM} bytes"
+              test "$STATIC_RAM" -le 25600
+              test "$FREE_RAM" -ge 15360
+
+              "$NM" -S -n "$ELF" | grep -E "nfwRamLog(Magic|Version|NfwFramesOmitted|Write|Total)?$" > /out/RAMLOG-SYMBOLS.txt
+              cat /out/RAMLOG-SYMBOLS.txt
+              RING_SIZE="$(grep -E " nfwRamLog$" /out/RAMLOG-SYMBOLS.txt | tr -s " " | cut -d " " -f 2)"
+              test "$RING_SIZE" = "00004000"
+              test "$(wc -l < /out/RAMLOG-SYMBOLS.txt)" -eq 6
+            '
+
+      - name: Audit byte-stream RAM-log filter
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          dec = Path('rs41-rsm424/decode_ram_log.py').read_text()
+          required = [
+              "constexpr uint32_t NFW_RAM_LOG_SIZE = 16384;",
+              "nfwRamLogVersion __attribute__((used)) = 3;",
+              "nfwRamLogVersion = 3;",
+              "filterRamByte(b);",
+              "for (size_t i = 0; i < size; ++i) filterRamByte(buffer[i]);",
+              "case 4: return b == '|' || b == ',';",
+              "nfwRamLogNfwFramesOmitted++;",
+              "if (b == '\\n') resetLineFilter();",
+          ]
+          missing = [s for s in required if s not in src]
+          if missing:
+              raise SystemExit('RAM-log byte-stream filter audit failed; missing: ' + repr(missing))
+          if "buffer[4] == ','" in src:
+              raise SystemExit('RAM-log filter audit failed: obsolete bulk-only comma detector still present')
+          for required_decoder in ('version != 3', 'len(ring) != 16384', 'RAM-log identity = NFWL v3'):
+              if required_decoder not in dec:
+                  raise SystemExit('RAM-log decoder audit failed; missing: ' + required_decoder)
+          print('RAM-log audit: PASS (16 KiB NFWL v3, byte-stream $NFW filter)')
+          PY
+
+      - name: Audit TX-only low-power LEDs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          cfg = Path('nfw/rs41-nfw_sonde-firmware/CONFIG.h').read_text()
+          if not re.search(r'ledStatusEnable\s*=\s*false\s*;', cfg):
+              raise SystemExit('TX-only LED audit failed: ledStatusEnable is not false')
+          required = [
+              'Low-power diagnostic build: normal status/startup LED calls stay dark.',
+              'TX-only LED policy: with normal status LEDs disabled, light green only while',
+              'digitalWrite(GREEN_LED_PIN, LOW);',
+              'void radioDisableTx() {',
+              'digitalWrite(GREEN_LED_PIN, HIGH);',
+          ]
+          missing = [s for s in required if s not in src]
+          if missing:
+              raise SystemExit('TX-only LED audit failed; missing: ' + repr(missing))
+          print('TX-only LED audit: PASS (dark except actual radio TX interval)')
+          PY
+
+      - name: Audit full RS41 factory humidity check
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, math, re
+          from pathlib import Path
+
+          src = Path('nfw/rs41-nfw_sonde-firmware/rs41-nfw_sonde-firmware.ino').read_text()
+          cfg = Path('out/CONFIG.h').read_text()
+          corr = json.loads(Path('out/factory-rh-pressure-corrections.json').read_text())
+
+          required_src = [
+              'float factoryRhSensorLocal = -1.0f;',
+              'float factoryRhCorrectedCp = 0.0f;',
+              'float factoryRhRawCap = 0.0f;',
+              'factoryCorHp[j]',
+              'factoryCorHt[4 * j + k]',
+              'Cp -= corrCp;',
+              'factoryRhSensorLocal = rh;',
+              'const float reconditioningTargetC = 150.0f;',
+              'const unsigned long reconditioningDwellMs = 180000UL;',
+              'humidity CHECK 3-minute hot dwell started',
+              'humidity CHECK zero sample ',
+              'factoryVaporSatP(preheatAirT) / factoryVaporSatP(extHeaterTemperatureValue)',
+              'capSum += factoryRhRawCap;',
+              'physical-zero correction ',
+              'humidity CHECK cooling after reconditioning',
+          ]
+          missing = [s for s in required_src if s not in src]
+          if missing:
+              raise SystemExit('Factory humidity v5/v6 audit failed; missing: ' + repr(missing))
+          forbidden = [
+              'rhSum += humidityValue; rhCount++;',
+              'millis() - reached115Millis >= 30000',
+              'extHeaterHandler(true, 138, extHeaterTemperatureValue)',
+          ]
+          present = [s for s in forbidden if s in src]
+          if present:
+              raise SystemExit('Factory humidity v5/v6 audit found obsolete logic: ' + repr(present))
+
+          if not re.search(r'const\s+float\s+factoryCorHp\[3\]\s*=\s*\{', cfg):
+              raise SystemExit('factoryCorHp[3] missing from CONFIG.h')
+          if not re.search(r'const\s+float\s+factoryCorHt\[12\]\s*=\s*\{', cfg):
+              raise SystemExit('factoryCorHt[12] missing from CONFIG.h')
+          assert corr['sensor_boom_serial'] == 'X0852387'
+          assert len(corr['corHp']) == 3 and len(corr['corHt']) == 12
+          assert all(math.isfinite(float(x)) for x in corr['corHp'] + corr['corHt'])
+          print('Full RS41 factory humidity v5/v6 audit: PASS')
+          print(json.dumps(corr, indent=2))
+          PY
+
+      - name: Audit generated configuration
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+
+          cfg = Path('nfw/rs41-nfw_sonde-firmware/CONFIG.h').read_text()
+          summary = json.loads(Path('out/build-summary.json').read_text())
+
+          checks = {
+              'RSM4x4 selected': r'^#define\s+RSM4x4\b',
+              'RSM4x2 disabled': r'^//\s*#define\s+RSM4x2\b',
+              'Horus V3 enabled': r'constexpr\s+bool\s+horusV3Enable\s*=\s*true\s*;',
+              'Horus V3 period 60': r'horusV3TimeSyncSeconds\s*=\s*60\s*;',
+              '433.900 MHz only': r'horusV3FreqTable\[\]\s*=\s*\{433\.9\}\s*;',
+              'AK5Z callsign': r'#define\s+HORUS_V3_CALLSIGN\s+"AK5Z"',
+              'Horus V3 power 3': r'horusV3RadioPower\s*=\s*3\s*;',
+              'Horus V2 disabled': r'horusEnable\s*=\s*false\s*;',
+              'APRS disabled': r'aprsEnable\s*=\s*false\s*;',
+              'RTTY disabled': r'rttyEnable\s*=\s*false\s*;',
+              'Morse disabled': r'morseEnable\s*=\s*false\s*;',
+              'PIP disabled': r'pipEnable\s*=\s*false\s*;',
+              'fox hunt disabled': r'foxHuntMode\s*=\s*false\s*;',
+              'private landing disabled': r'privateLandingModeEnable\s*=\s*false\s*;',
+              'RSM4x4 data recorder disabled': r'#ifdef\s+RSM4x4\s+bool\s+dataRecorderEnable\s*=\s*false\s*;',
+              'factory temperature check': r'factoryTemperatureCheck\s*=\s*true\s*;',
+              'factory humidity check': r'factoryHumidityCheck\s*=\s*true\s*;',
+              'separate reconditioning disabled': r'reconditioningEnabled\s*=\s*false\s*;',
+              'zero humidity recalibration disabled': r'zeroHumidityCalibration\s*=\s*false\s*;',
+              'RPM411 pressure': r'pressureMode\s*=\s*1\s*;',
+              'reference heater off': r'referenceHeating\s*=\s*false\s*;',
+              'humidity heater off': r'humidityModuleHeating\s*=\s*false\s*;',
+              'GPS mode 2': r'gpsOperationMode\s*=\s*2\s*;',
+              'M10 cyclic tracking': r'm10CyclicTracking\s*=\s*true\s*;',
+              'M10 cyclic 60 s': r'm10CyclicPeriodSec\s*=\s*60\s*;',
+              'GLONASS secondary': r'gpsSecondaryGnss\s*=\s*2\s*;',
+              'SBAS off': r'gpsSbasEnable\s*=\s*false\s*;',
+              'XDATA log mode': r'xdataPortMode\s*=\s*1\s*;',
+              'normal LEDs disabled': r'ledStatusEnable\s*=\s*false\s*;',
+          }
+          failed = [label for label, pattern in checks.items() if not re.search(pattern, cfg, re.M | re.S)]
+          if failed:
+              raise SystemExit('Configuration audit failed: ' + ', '.join(failed))
+
+          cal = summary['factory_calibration']
+          assert summary['probe_mainboard_serial'] == 'X0551026'
+          assert summary['sensor_boom_calibration_serial'] == 'X0852387'
+          assert cal['requested_serial'] == 'X0852387'
+          assert cal['subframe_serial'] == 'X0852387'
+          assert cal['mainboard'] == 'RSM424'
+          assert cal['mainboard_serial'] == 'X0551026'
+          assert summary['period_seconds'] == 60
+          assert summary['ram_debug_ring_bytes'] == 16384
+          assert summary['ram_debug_version'] == 3
+          assert summary['ram_debug_magic'] == 'NFWL'
+          assert summary['ram_debug_omits_bulk_nfw_frames'] is True
+          print('Generated configuration audit: PASS')
+          PY
+
+      - name: Canonicalize and verify build products
+        run: |
+          set -euo pipefail
+          ORIGINAL_BIN="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.bin' -print -quit)"
+          ORIGINAL_ELF="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.elf' -print -quit)"
+          ORIGINAL_HEX="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.hex' -print -quit)"
+          ORIGINAL_MAP="$(find out -maxdepth 1 -type f -name 'rs41-nfw_sonde-firmware.ino.map' -print -quit)"
+          for f in "$ORIGINAL_BIN" "$ORIGINAL_ELF" "$ORIGINAL_HEX" "$ORIGINAL_MAP"; do test -s "$f"; done
+
+          cp -- "$ORIGINAL_BIN" "out/${PACKAGE_BASENAME}.bin"
+          cp -- "$ORIGINAL_ELF" "out/${PACKAGE_BASENAME}.elf"
+          cp -- "$ORIGINAL_HEX" "out/${PACKAGE_BASENAME}.hex"
+          cp -- "$ORIGINAL_MAP" "out/${PACKAGE_BASENAME}.map"
+          rm -- "$ORIGINAL_BIN" "$ORIGINAL_ELF" "$ORIGINAL_HEX" "$ORIGINAL_MAP"
+
+          test "$(stat -c %s "out/${PACKAGE_BASENAME}.bin")" -le 131072
+          (cd out && sha256sum "${PACKAGE_BASENAME}.bin" > SHA256SUMS)
+          cat out/SHA256SUMS
+
+          cp rs41-rsm424/flash-openocd.sh out/flash-openocd.sh
+          cp rs41-rsm424/dump-ram-log.sh out/dump-ram-log.sh
+          cp rs41-rsm424/decode_ram_log.py out/decode_ram_log.py
+          cp rs41-rsm424/README-aggressive.txt out/README.txt
+          chmod 0755 out/flash-openocd.sh out/dump-ram-log.sh out/decode_ram_log.py
+          bash -n out/flash-openocd.sh
+          bash -n out/dump-ram-log.sh
+          python3 -m py_compile \
+            out/decode_ram_log.py \
+            rs41-rsm424/build_config.py \
+            rs41-rsm424/instrument_ram_log.py \
+            rs41-rsm424/inject_factory_rh_pressure_cal.py \
+            rs41-rsm424/fix_factory_humidity_check.py \
+            rs41-rsm424/fix_v5_factory_cap_logging.py \
+            rs41-rsm424/enable_tx_only_led.py
+          rm -rf out/__pycache__ rs41-rsm424/__pycache__
+
+          grep -q 'AGGRESSIVE-RAMLOG-v6' out/README.txt
+          grep -q '16384-byte circular SRAM ring' out/README.txt
+          grep -q 'NFWL" RAM-log ABI v3' out/README.txt
+          grep -q 'ledStatusEnable.*false' out/CONFIG.h
+
+          cat > out/DEVICE.txt <<EOF
+          Canonical package: ${PACKAGE_BASENAME}.zip
+          Probe / main electronics: ${PROBE_SERIAL}
+          Sensor boom / calibration: ${SENSOR_BOOM_SERIAL}
+          Board: RSM424 / STM32L412RBT6
+          Frequency: 433.900 MHz
+          Mode: Horus Binary V3
+          Callsign: AK5Z
+          RF period: 60 seconds, GPS-clock aligned
+          Startup humidity: about 150 C for 3 minutes, physical-zero check, then cooling
+          Factory RH: full matrix plus corHp/corHt pressure compensation
+          Zero-humidity flash recalibration: disabled
+          LEDs: low-power TX-only; dark except green during actual keyed RF TX
+          RAM log: 16384-byte human-readable XDATA circular buffer; package v6, NFWL ABI v3; \$NFW lines omitted
+          EOF
+
+          echo '--- final artifact contents ---'
+          find out -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+
+      - name: Upload canonical firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_BASENAME }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
