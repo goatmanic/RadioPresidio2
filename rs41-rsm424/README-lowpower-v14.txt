@@ -76,7 +76,8 @@ Canonical v14 build
 CI run: 32813701761
 Artifact ID: 9550704139
 ZIP SHA256: 214ced3117ded7bb3fb4464e8ed9d1e58577f2d53e18bdae3c30258e0bacdc11
-Binary size: 88312 bytes
+Packaged BIN size: 88312 bytes
+Arduino sketch flash report: 87868 bytes
 Binary SHA256: 53e585d787912b17c4fdc6d78e3be5619facbf0c0a076c85d73a906aad828561
 
 Hardware acceptance criteria
